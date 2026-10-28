@@ -38,7 +38,7 @@ public class BlockScanner {
     private final BlockSyncStateMapper blockSyncStateMapper;
     private final RedissonClient redissonClient;
 
-    @Scheduled(fixedDelayString = "${web3.scanner.interval-ms:30000}")
+//    @Scheduled(fixedDelayString = "${web3.scanner.interval-ms:30000}")
     public void scanByScheduler() {
         doScan("spring-scheduler");
     }
