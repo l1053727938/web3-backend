@@ -7,7 +7,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 
 @SpringBootApplication
 @EnableScheduling
-@MapperScan("com.example.web3.mapper")
+@MapperScan("com.ray.web3.mapper")
 public class Web3BackendApplication {
 
     public static void main(String[] args) {
