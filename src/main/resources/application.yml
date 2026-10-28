@@ -96,5 +96,5 @@ xxl:
 
 logging:
   level:
-    com.example.web3: debug
+    com.ray.web3: debug
     org.web3j: info
