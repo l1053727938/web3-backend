@@ -11,7 +11,7 @@
         <relativePath/>
     </parent>
 
-    <groupId>com.example.web3</groupId>
+    <groupId>com.ray.web3</groupId>
     <artifactId>web3-backend</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <name>web3-backend</name>
