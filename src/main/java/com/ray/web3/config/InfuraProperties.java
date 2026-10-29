@@ -27,4 +27,7 @@ public class InfuraProperties {
 
     /** HTTP RPC 代理端口，配合 proxyHost 使用（如 7890） */
     private Integer proxyPort;
+
+    /** eth_getLogs 分页拉取时的单段最大区块跨度（Infura 等节点对跨度/日志数有限制） */
+    private int logChunkSize = 5;
 }

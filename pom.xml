@@ -120,13 +120,6 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
-        <!-- Web3j Test：内嵌临时链做集成测试 -->
-        <dependency>
-            <groupId>org.web3j</groupId>
-            <artifactId>test</artifactId>
-            <version>${web3j.version}</version>
-            <scope>test</scope>
-        </dependency>
     </dependencies>
 
     <build>

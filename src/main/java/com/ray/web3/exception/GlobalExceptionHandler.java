@@ -20,6 +20,13 @@ public class GlobalExceptionHandler {
                 .body(ApiResponse.fail(400, "参数校验失败: " + e.getBindingResult().getAllErrors()));
     }
 
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ApiResponse<Void>> handleIllegalArgument(IllegalArgumentException e) {
+        log.warn("请求参数非法: {}", e.getMessage());
+        return ResponseEntity.badRequest()
+                .body(ApiResponse.fail(400, e.getMessage()));
+    }
+
     @ExceptionHandler(TransactionException.class)
     public ResponseEntity<ApiResponse<Void>> handleTransaction(TransactionException e) {
         log.error("链上交易异常", e);
