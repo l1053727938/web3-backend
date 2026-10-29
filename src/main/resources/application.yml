@@ -37,10 +37,9 @@ web3:
     # 需要时去掉下面两行注释（或用环境变量 WEB3_PROXY_HOST/WEB3_PROXY_PORT 注入）；留空则直连
     proxy-host: ${WEB3_PROXY_HOST:127.0.0.1}
     proxy-port: ${WEB3_PROXY_PORT:7890}
+#    http-url: http://127.0.0.1:8545
 #    http-url: https://sepolia.infura.io/v3/${INFURA_PROJECT_ID:}
     http-url: https://mainnet.infura.io/v3/${INFURA_PROJECT_ID:}
-#    ws-url: wss://sepolia.infura.io/ws/v3/${INFURA_PROJECT_ID:}
-    ws-url: wss://mainnet.infura.io/ws/v3/${INFURA_PROJECT_ID:}
 #    chain-id: 11155111   # Sepolia 测试网；主网为 1，对应改 https://mainnet.infura.io
     chain-id: 1   # Sepolia 测试网；主网为 1，对应改 https://mainnet.infura.io
     # eth_getLogs 分页单段最大区块跨度，节点限制更严时可调小（如 500/1000）
