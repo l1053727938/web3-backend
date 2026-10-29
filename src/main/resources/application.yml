@@ -39,7 +39,9 @@ web3:
     proxy-port: ${WEB3_PROXY_PORT:7890}
 #    http-url: http://127.0.0.1:8545
 #    http-url: https://sepolia.infura.io/v3/${INFURA_PROJECT_ID:}
-    http-url: https://mainnet.infura.io/v3/${INFURA_PROJECT_ID:}
+#    http-url: https://mainnet.infura.io/v3/${INFURA_PROJECT_ID:}
+#    http-url: https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
+    http-url: https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
 #    chain-id: 11155111   # Sepolia 测试网；主网为 1，对应改 https://mainnet.infura.io
     chain-id: 1   # Sepolia 测试网；主网为 1，对应改 https://mainnet.infura.io
     # eth_getLogs 分页单段最大区块跨度，节点限制更严时可调小（如 500/1000）
@@ -53,7 +55,9 @@ web3:
     enabled: ${WEB3_WS_ENABLED:true}
     # Anvil: ws://127.0.0.1:8545   Infura: wss://mainnet.infura.io/ws/v3/{projectId}
 #    url: ${WEB3_WS_URL:ws://127.0.0.1:8545}
-    url: wss://mainnet.infura.io/ws/v3/${INFURA_PROJECT_ID:}
+#    url: wss://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
+    url: wss://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
+#    url: wss://mainnet.infura.io/ws/v3/${ALCHEMY_PROJECT_ID:}
 #    url: wss://sepolia.infura.io/ws/v3/${INFURA_PROJECT_ID:}
     # wss 代理：底层 Java-WebSocket 不读系统代理/JVM 代理参数，必须在此显式配置（留空则直连）
     proxy-host: ${WEB3_PROXY_HOST:127.0.0.1}
