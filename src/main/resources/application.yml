@@ -56,6 +56,9 @@ web3:
 #    url: ${WEB3_WS_URL:ws://127.0.0.1:8545}
     url: wss://mainnet.infura.io/ws/v3/${INFURA_PROJECT_ID:}
 #    url: wss://sepolia.infura.io/ws/v3/${INFURA_PROJECT_ID:}
+    # wss 代理：底层 Java-WebSocket 不读系统代理/JVM 代理参数，必须在此显式配置（留空则直连）
+    proxy-host: ${WEB3_PROXY_HOST:127.0.0.1}
+    proxy-port: ${WEB3_PROXY_PORT:7890}
     subscribe-new-heads: true
     # 监听 Transfer 日志的合约地址，多个用逗号分隔；留空则监听全链 Transfer（量大慎用）
     watch-contracts: ${WEB3_WATCH_CONTRACTS:0xdac17f958d2ee523a2206206994597c13d831ec7}
