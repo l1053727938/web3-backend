@@ -1,23 +1,23 @@
 package com.ray.web3.service.impl;
 
 import com.ray.web3.config.InfuraProperties;
+import com.ray.web3.model.dto.TransferEventDTO;
 import com.ray.web3.model.vo.TransferLogVO;
 import com.ray.web3.service.EventLogService;
 import com.ray.web3.service.RpcCallService;
+import com.ray.web3.service.TokenMetadataService;
+import com.ray.web3.util.TransferEventDecoder;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.web3j.abi.EventEncoder;
 import org.web3j.abi.EventValues;
-import org.web3j.abi.FunctionReturnDecoder;
-import org.web3j.abi.TypeReference;
-import org.web3j.abi.datatypes.Event;
-import org.web3j.abi.datatypes.Type;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameter;
 import org.web3j.protocol.core.methods.request.EthFilter;
+import org.web3j.protocol.core.methods.response.EthGetTransactionReceipt;
 import org.web3j.protocol.core.methods.response.EthLog;
 import org.web3j.protocol.core.methods.response.Log;
+import org.web3j.protocol.core.methods.response.TransactionReceipt;
 import org.web3j.utils.Numeric;
 
 import java.math.BigInteger;
@@ -35,14 +35,19 @@ import java.util.regex.Pattern;
 @RequiredArgsConstructor
 public class EventLogServiceImpl implements EventLogService {
 
-    /** ERC-20 Transfer(address,address,uint256) 事件签名哈希 */
-    private static final String TOPIC_TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-
     private static final Pattern ADDRESS_PATTERN = Pattern.compile("^0x[0-9a-fA-F]{40}$");
+
+    /** 交易哈希：0x + 64 位 hex */
+    private static final Pattern TX_HASH_PATTERN = Pattern.compile("^0x[0-9a-fA-F]{64}$");
 
     /** 节点结果数超限错误（如 Infura：query returned more than 10000 results. Try with this block range [0x.., 0x..]） */
     private static final Pattern RESULT_LIMIT_ERROR_PATTERN =
             Pattern.compile("returned more than \\d+ results.*?\\[(0x[0-9a-fA-F]+),\\s*(0x[0-9a-fA-F]+)]", Pattern.CASE_INSENSITIVE);
+
+    /** 节点上限类错误但无法解析建议区间的形态（如 Alchemy "block range is too wide"、Geth "query returned too many events"） */
+    private static final Pattern RANGE_LIMIT_ERROR_PATTERN =
+            Pattern.compile("(block range|range too (?:large|wide)|too many (?:results|logs|events)|limit exceeded)",
+                    Pattern.CASE_INSENSITIVE);
 
     /** 节点建议区间的跨度若仍不足 16 块，说明单块日志数就可能超限，停止自适应 */
     private static final BigInteger MIN_CHUNK_SPAN = BigInteger.valueOf(16);
@@ -50,15 +55,64 @@ public class EventLogServiceImpl implements EventLogService {
     private final Web3j web3j;
     private final InfuraProperties infuraProperties;
     private final RpcCallService rpcCallService;
+    private final TokenMetadataService tokenMetadataService;
 
     @Override
     public List<TransferLogVO> fetchTransferLogs(String contractAddress, BigInteger fromBlock, BigInteger toBlock) {
-        if (contractAddress == null || !ADDRESS_PATTERN.matcher(contractAddress).matches()) {
-            throw new IllegalArgumentException("合约地址格式非法: " + contractAddress);
+        List<TransferLogVO> result = new ArrayList<>();
+        for (Log raw : collectLogs(contractAddress, fromBlock, toBlock)) {
+            // 按 Transfer 蓝图解码并校验 topic[0]，非目标事件直接丢弃
+            TransferEventDecoder.extractEventValues(raw)
+                    .ifPresent(values -> result.add(toTransferLog(raw, values)));
         }
-        if (fromBlock == null || toBlock == null || fromBlock.signum() < 0 || fromBlock.compareTo(toBlock) > 0) {
-            throw new IllegalArgumentException("区块区间非法: [" + fromBlock + ", " + toBlock + "]");
+        return result;
+    }
+
+    @Override
+    public List<TransferEventDTO> fetchDecodedTransferLogs(String contractAddress, BigInteger fromBlock, BigInteger toBlock) {
+        return decodeAll(contractAddress, collectLogs(contractAddress, fromBlock, toBlock));
+    }
+
+    @Override
+    public List<TransferEventDTO> fetchTransferLogPage(String contractAddress, BigInteger fromBlock, BigInteger toBlock) {
+        validateContract(contractAddress);
+        validateRange(fromBlock, toBlock);
+        // 补拉按页推进游标：区间以入参为准（链高截断由调用方完成），页内命中节点上限时自动缩跨度续拉
+        return decodeAll(contractAddress, fetchLogsAdaptive(contractAddress, fromBlock, toBlock));
+    }
+
+    @Override
+    public List<TransferEventDTO> fetchTransfersByTx(String txHash) {
+        if (txHash == null || !TX_HASH_PATTERN.matcher(txHash).matches()) {
+            throw new IllegalArgumentException("交易哈希格式非法: " + txHash);
         }
+        EthGetTransactionReceipt receipt;
+        try {
+            receipt = web3j.ethGetTransactionReceipt(txHash).send();
+        } catch (Exception e) {
+            throw new IllegalStateException("查询交易收据失败: " + e.getMessage(), e);
+        }
+        if (receipt.hasError()) {
+            throw new IllegalStateException("eth_getTransactionReceipt 节点返回错误: " + receipt.getError().getMessage());
+        }
+        TransactionReceipt txReceipt = receipt.getTransactionReceipt()
+                .orElseThrow(() -> new IllegalArgumentException("交易不存在或尚未上块: " + txHash));
+
+        List<TransferEventDTO> result = new ArrayList<>();
+        for (Log raw : txReceipt.getLogs()) {
+            // 单笔交易可能触及多个代币合约，精度按各日志的合约地址动态获取
+            TransferEventDecoder.decode(raw, tokenMetadataService.decimals(raw.getAddress()))
+                    .ifPresent(result::add);
+        }
+        return result;
+    }
+
+    /**
+     * 参数校验 + 链上高度截断 + 按块跨度分段循环拉取，返回区间内的原始日志
+     */
+    private List<Log> collectLogs(String contractAddress, BigInteger fromBlock, BigInteger toBlock) {
+        validateContract(contractAddress);
+        validateRange(fromBlock, toBlock);
 
         // 结束区块不能超过当前链上高度
         BigInteger latest;
@@ -73,38 +127,100 @@ public class EventLogServiceImpl implements EventLogService {
         }
 
         BigInteger chunkSpan = BigInteger.valueOf(infuraProperties.getLogChunkSize());
-        List<TransferLogVO> result = new ArrayList<>();
+        List<Log> result = new ArrayList<>();
         int chunkCount = 0;
 
-        // 分页循环：每次最多拉 chunkSpan 个块；命中结果数超限则按节点建议缩小跨度重试本段
+        // 分页循环：每次最多拉 chunkSpan 个块；段内命中节点上限由 fetchLogsAdaptive 缩跨度续拉
         for (BigInteger from = fromBlock; from.compareTo(toBlock) <= 0; ) {
             BigInteger to = from.add(chunkSpan).subtract(BigInteger.ONE);
             if (to.compareTo(toBlock) > 0) {
                 to = toBlock;
             }
-
-            List<TransferLogVO> chunk;
-            try {
-                chunk = fetchChunk(buildFilter(contractAddress, from, to), from, to);
-            } catch (IllegalStateException e) {
-                /*BigInteger suggested = parseSuggestedSpan(e.getMessage());
-                if (suggested == null || suggested.compareTo(chunkSpan) >= 0 || suggested.compareTo(MIN_CHUNK_SPAN) < 0) {
-                    throw e;
-                }*/
-//                log.warn("分段 [{},{}] 触发节点结果数上限，跨度 {} → {} 后重试", from, to, chunkSpan, suggested);
-//                chunkSpan = suggested;
-                log.error("分段 [{},{}] 触发节点结果数上限，跨度 {} ,", from, to, chunkSpan, e);
-                throw e;
-//                continue;   // 同一起点用新跨度重试本段（进度不丢，前面已拉取的段不受影响）
-            }
-            result.addAll(chunk);
+            result.addAll(fetchLogsAdaptive(contractAddress, from, to));
             chunkCount++;
 
             from = to.add(BigInteger.ONE);
         }
-        log.info("分页拉取完成 contract={} range=[{},{}] chunks={} finalSpan={} logs={}",
-                contractAddress, fromBlock, toBlock, chunkCount, chunkSpan, result.size());
+        log.info("分页拉取完成 contract={} range=[{},{}] chunks={} logs={}",
+                contractAddress, fromBlock, toBlock, chunkCount, result.size());
         return result;
+    }
+
+    /**
+     * 拉取一个区块分段的全部日志：命中节点单次结果数/区块跨度上限时自动缩小跨度续拉
+     * （优先采纳节点建议跨度，无建议则取当前跨度一半），已到 MIN_CHUNK_SPAN 护栏仍被拒则原样抛出
+     * <p>
+     * 缩跨度只改变请求切分方式、不改变结果集合：各子段日志按区块升序合并后仍是本段完整日志，
+     * 因此调用方可以安全地把游标推进到本段末尾
+     */
+    private List<Log> fetchLogsAdaptive(String contractAddress, BigInteger from, BigInteger to) {
+        try {
+            return fetchChunk(buildFilter(contractAddress, from, to), from, to);
+        } catch (IllegalStateException e) {
+            BigInteger span = to.subtract(from).add(BigInteger.ONE);
+            if (!isNodeLimitError(e.getMessage()) || span.compareTo(MIN_CHUNK_SPAN) <= 0) {
+                // 非上限类错误（网络/节点故障）缩跨度也无意义，直接抛出交给 rpc-segment 重试与熔断
+                throw e;
+            }
+            BigInteger subSpan = nextSpan(e.getMessage(), span);
+            log.warn("分段 [{},{}] 命中节点上限，跨度 {} → {} 后续拉: {}", from, to, span, subSpan, e.getMessage());
+
+            List<Log> logs = new ArrayList<>();
+            for (BigInteger cursor = from; cursor.compareTo(to) <= 0; ) {
+                BigInteger cursorTo = cursor.add(subSpan).subtract(BigInteger.ONE);
+                if (cursorTo.compareTo(to) > 0) {
+                    cursorTo = to;
+                }
+                logs.addAll(fetchLogsAdaptive(contractAddress, cursor, cursorTo));
+                cursor = cursorTo.add(BigInteger.ONE);
+            }
+            return logs;
+        }
+    }
+
+    /**
+     * 下一个尝试跨度：优先取节点建议跨度（通常已按结果密度算好），建议不合理时退化为二分，保证单调收敛
+     */
+    private BigInteger nextSpan(String errorMessage, BigInteger span) {
+        BigInteger suggested = parseSuggestedSpan(errorMessage);
+        if (suggested != null && suggested.signum() > 0 && suggested.compareTo(span) < 0) {
+            return suggested;
+        }
+        BigInteger half = span.divide(BigInteger.TWO);
+        return half.signum() > 0 ? half : BigInteger.ONE;
+    }
+
+    /**
+     * 是否为节点侧上限类错误，只有这类错误缩小跨度重试才有意义
+     */
+    private boolean isNodeLimitError(String errorMessage) {
+        return errorMessage != null
+                && (RESULT_LIMIT_ERROR_PATTERN.matcher(errorMessage).find()
+                || RANGE_LIMIT_ERROR_PATTERN.matcher(errorMessage).find());
+    }
+
+    /**
+     * 分批解析：同一合约精度只取一次（动态 decimals() + 结果缓存），非 Transfer 日志在解码阶段丢弃
+     */
+    private List<TransferEventDTO> decodeAll(String contractAddress, List<Log> logs) {
+        int decimals = tokenMetadataService.decimals(contractAddress);
+        List<TransferEventDTO> result = new ArrayList<>(logs.size());
+        for (Log raw : logs) {
+            TransferEventDecoder.decode(raw, decimals).ifPresent(result::add);
+        }
+        return result;
+    }
+
+    private void validateContract(String contractAddress) {
+        if (contractAddress == null || !ADDRESS_PATTERN.matcher(contractAddress).matches()) {
+            throw new IllegalArgumentException("合约地址格式非法: " + contractAddress);
+        }
+    }
+
+    private void validateRange(BigInteger fromBlock, BigInteger toBlock) {
+        if (fromBlock == null || toBlock == null || fromBlock.signum() < 0 || fromBlock.compareTo(toBlock) > 0) {
+            throw new IllegalArgumentException("区块区间非法: [" + fromBlock + ", " + toBlock + "]");
+        }
     }
 
     private EthFilter buildFilter(String contractAddress, BigInteger from, BigInteger to) {
@@ -112,31 +228,10 @@ public class EventLogServiceImpl implements EventLogService {
                 DefaultBlockParameter.valueOf(from),
                 DefaultBlockParameter.valueOf(to),
                 contractAddress);
-        // 自动生成事件签名哈希，不用手敲 0xddf252ad...
-//        filter.addSingleTopic(EventEncoder.encode(TRANSFER_EVENT));
-        filter.addNullTopic(); // 添加空主题以匹配所有地址
+        // 按事件蓝图自动生成的 topic[0] 在节点侧过滤 Transfer，避免把合约全部日志拉回本地再丢弃
+        filter.addSingleTopic(TransferEventDecoder.transferEventTopic());
         return filter;
     }
-
-    // 3. 解析时利用 EventDecoder（不用自己算 substring）
-    /*private TransferLogVO toTransferLog(Log log) {
-        // 官方解码器会帮你处理 indexed 和非 indexed 的字段
-        EventValues eventValues = extractEventValues(TRANSFER_EVENT, log);
-
-        assert eventValues != null;
-        String from = eventValues.getIndexedValues().get(0).getValue().toString();
-        String to = eventValues.getIndexedValues().get(1).getValue().toString();
-        BigInteger value = (BigInteger) eventValues.getNonIndexedValues().getFirst().getValue();
-        return new TransferLogVO(
-                log.getBlockNumber(),
-                log.getTransactionHash(),
-                log.getLogIndex(),
-                log.getAddress(),
-                from,
-                to,
-                value);
-    }*/
-
 
     /**
      * 从错误信息解析节点建议的块跨度；无法解析返回 null
@@ -156,58 +251,35 @@ public class EventLogServiceImpl implements EventLogService {
     }
 
     /**
-     * 拉取单个区块分段，并解析 LogObject 为 TransferLogVO（网络层重试由 RpcCallService 承担）
+     * 拉取单个区块分段的原始日志（网络层重试由 RpcCallService 承担）
      */
-    private List<TransferLogVO> fetchChunk(EthFilter filter, BigInteger from, BigInteger to) {
+    private List<Log> fetchChunk(EthFilter filter, BigInteger from, BigInteger to) {
         EthLog ethLog = rpcCallService.ethGetLogs(filter);
         if (ethLog.hasError()) {
             throw new IllegalStateException(
                     "eth_getLogs 节点返回错误 [" + from + "," + to + "]: " + ethLog.getError().getMessage());
         }
 
-        List<TransferLogVO> chunk = new ArrayList<>();
+        List<Log> chunk = new ArrayList<>();
         for (EthLog.LogResult<?> logResult : ethLog.getLogs()) {
             // Web3j 返回 List<LogResult<?>>，只有 LogObject 才携带具体日志（它本身就是 Log）
             if (!(logResult instanceof EthLog.LogObject logObject)) {
                 // 订阅模式下的 Hash 类型结果，直接跳过
                 continue;
             }
-            chunk.add(toTransferLog(logObject));
+            chunk.add(logObject);
         }
-        log.debug("分段 [{},{}] 拉取到 {} 条 Transfer 日志", from, to, chunk.size());
+        log.debug("分段 [{},{}] 拉取到 {} 条原始日志", from, to, chunk.size());
         return chunk;
     }
 
-    /*public static EventValues extractEventValues(Event event, Log log) {
-        final List<String> topics = log.getTopics();
-        String encodedEventSignature = EventEncoder.encode(event);
-
-        // 校验 Topic[0] 是否匹配事件签名
-        if (topics == null || topics.isEmpty() || !topics.getFirst().equals(encodedEventSignature)) {
-            return null;
-        }
-
-        List<Type> indexedValues = new ArrayList<>();
-        List<Type> nonIndexedValues = FunctionReturnDecoder.decode(
-                log.getData(), event.getNonIndexedParameters());
-
-        List<TypeReference<Type>> indexedParameters = event.getIndexedParameters();
-        for (int i = 0; i < indexedParameters.size(); i++) {
-            Type value = FunctionReturnDecoder.decodeIndexedValue(
-                    topics.get(i + 1), indexedParameters.get(i));
-            indexedValues.add(value);
-        }
-        return new EventValues(indexedValues, nonIndexedValues);
-    }*/
-
     /**
-     * 将原始 Log 解析为 Transfer 事件：topic[1]=from，topic[2]=to，data=金额
+     * 解码结果映射为既有视图对象：from/to 取自 indexed topics，金额取自 data（已在解码阶段丢弃非 Transfer 事件）
      */
-    private TransferLogVO toTransferLog(Log logObject) {
-        List<String> topics = logObject.getTopics();
-        String from = topics.size() > 1 ? extractAddress(topics.get(1)) : null;
-        String to = topics.size() > 2 ? extractAddress(topics.get(2)) : null;
-        BigInteger value = Numeric.toBigInt(logObject.getData());
+    private TransferLogVO toTransferLog(Log logObject, EventValues values) {
+        String from = (String) values.getIndexedValues().getFirst().getValue();
+        String to = (String) values.getIndexedValues().get(1).getValue();
+        BigInteger value = (BigInteger) values.getNonIndexedValues().getFirst().getValue();
         return new TransferLogVO(
                 logObject.getBlockNumber(),
                 logObject.getTransactionHash(),
@@ -216,12 +288,5 @@ public class EventLogServiceImpl implements EventLogService {
                 from,
                 to,
                 value);
-    }
-
-    /**
-     * 从 32 字节 topic 中提取末尾 20 字节的地址（小端补齐：0x + 24个0 + 40位地址）
-     */
-    private String extractAddress(String topic) {
-        return "0x" + topic.substring(topic.length() - 40);
     }
 }

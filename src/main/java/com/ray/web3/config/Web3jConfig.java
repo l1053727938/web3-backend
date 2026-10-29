@@ -12,7 +12,7 @@ import java.net.InetSocketAddress;
 import java.net.Proxy;
 
 @Configuration
-@EnableConfigurationProperties(InfuraProperties.class)
+@EnableConfigurationProperties({InfuraProperties.class, BackfillProperties.class})
 public class Web3jConfig {
 
     /**

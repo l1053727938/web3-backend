@@ -1,6 +1,7 @@
 package com.ray.web3.listener;
 
 import com.ray.web3.config.WebSocketProperties;
+import com.ray.web3.util.TransferEventDecoder;
 import io.reactivex.disposables.CompositeDisposable;
 import io.reactivex.disposables.Disposable;
 import jakarta.annotation.PreDestroy;
@@ -39,8 +40,8 @@ import java.util.Optional;
 @ConditionalOnProperty(name = "web3.websocket.enabled", havingValue = "true")
 public class ChainEventListener {
 
-    /** ERC-20 Transfer(address,address,uint256) 事件签名哈希 */
-    private static final String TOPIC_TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    /** ERC-20 Transfer(address,address,uint256) 事件签名哈希：与 eth_getLogs 过滤、解码校验共用同一来源 */
+    private static final String TOPIC_TRANSFER = TransferEventDecoder.transferEventTopic();
 
     private final Web3j wsWeb3j;
     private final WebSocketService webSocketService;
@@ -57,7 +58,7 @@ public class ChainEventListener {
         this.properties = properties;
     }
 
-    @EventListener(ApplicationReadyEvent.class)
+//    @EventListener(ApplicationReadyEvent.class)
     public void startSubscriptions() {
         if (properties.isSubscribeNewHeads()) {
             subscribeNewHeads();

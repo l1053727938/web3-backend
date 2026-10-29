@@ -8,7 +8,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:web3_backend}?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true
     username: ${MYSQL_USERNAME:root}
-    password: ${MYSQL_PASSWORD:root123}
+    password: ${MYSQL_PASSWORD:root}
     hikari:
       maximum-pool-size: 20
       minimum-idle: 5
@@ -39,16 +39,25 @@ web3:
     proxy-port: ${WEB3_PROXY_PORT:7890}
 #    http-url: http://127.0.0.1:8545
 #    http-url: https://sepolia.infura.io/v3/${INFURA_PROJECT_ID:}
-#    http-url: https://mainnet.infura.io/v3/${INFURA_PROJECT_ID:}
+    http-url: https://mainnet.infura.io/v3/${INFURA_PROJECT_ID:}
 #    http-url: https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
-    http-url: https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
+#    http-url: https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
 #    chain-id: 11155111   # Sepolia 测试网；主网为 1，对应改 https://mainnet.infura.io
     chain-id: 1   # Sepolia 测试网；主网为 1，对应改 https://mainnet.infura.io
     # eth_getLogs 分页单段最大区块跨度，节点限制更严时可调小（如 500/1000）
-    log-chunk-size: ${WEB3_LOG_CHUNK_SIZE:100}
+    log-chunk-size: ${WEB3_LOG_CHUNK_SIZE:50}
   scanner:
     enabled: true
     interval-ms: 30000
+  # ============ 历史日志补拉（监听器启动时的状态补齐）============
+  backfill:
+    enabled: ${WEB3_BACKFILL_ENABLED:true}
+    # 单页区块跨度：节点单次结果上限(Infura 10000 条)被打穿时由 EventLogService 自动缩跨度续拉，无需手工调小
+    chunk-size: ${WEB3_BACKFILL_CHUNK_SIZE:1000}
+    # 单次请求最多推进的区块数，0=不限；设为正数可把大区间拆成多次调用（下次从游标自动续拉）
+    max-blocks-per-run: ${WEB3_BACKFILL_MAX_BLOCKS:0}
+    # 游标读优先走 Redis（关闭后每次直读 MySQL，Redis 不可用时也自动降级）
+    cursor-cache-enabled: ${WEB3_BACKFILL_CURSOR_CACHE:true}
   # ============ WebSocket 实时订阅（newHeads & logs）============
   # 默认关闭，需要时打开 enabled（本地 Anvil 或 Infura WS 端点）
   websocket:
@@ -75,9 +84,21 @@ resilience4j:
         max-attempts: 3
         wait-duration: 500ms
       # 分页拉日志：按单个区块分段粒度重试，不重跑整个拉取过程
+      # 429 限流场景下用指数退避+随机抖动拉开重试间隔，避免固定 500ms 密集重击
       rpc-segment:
-        max-attempts: 3
+        max-attempts: 5
         wait-duration: 500ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        enable-randomized-wait: true
+        randomized-wait-factor: 0.5
+  ratelimiter:
+    instances:
+      # 主动平滑 RPC 吞吐，避免触发 Infura 429：limit-for-period 次/每秒
+      rpc-segment:
+        limit-for-period: 5
+        limit-refresh-period: 1s
+        timeout-duration: 5s
   circuitbreaker:
     instances:
       rpc:
