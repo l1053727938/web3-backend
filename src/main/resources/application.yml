@@ -61,6 +61,7 @@ web3:
     subscribe-new-heads: true
     # 监听 Transfer 日志的合约地址，多个用逗号分隔；留空则监听全链 Transfer（量大慎用）
     watch-contracts: ${WEB3_WATCH_CONTRACTS:0xdac17f958d2ee523a2206206994597c13d831ec7}
+#    watch-contracts: ${WEB3_WATCH_CONTRACTS:}
 
 # ============ Resilience4j：RPC 容错 ============
 resilience4j:

@@ -81,7 +81,7 @@ public class ChainEventListener {
         var head = notification.getParams().getResult();
         BigInteger number = Numeric.toBigInt(head.getNumber());
         BigInteger timestamp = Numeric.toBigInt(head.getTimestamp());
-        log.info("[newHeads] #{} hash={} gasUsed={} at={}",
+        log.info("[newHeads] block=#{} hash={} gasUsed={} at={}",
                 number, head.getHash(), head.getGasUsed(),
                 Instant.ofEpochSecond(timestamp.longValue()));
     }
@@ -97,6 +97,7 @@ public class ChainEventListener {
         List<String> contracts =
                 Optional.ofNullable(properties.getWatchContracts()).orElse(Collections.emptyList());
         Disposable d = wsWeb3j.logsNotifications(contracts, Collections.singletonList(TOPIC_TRANSFER))
+//        Disposable d = wsWeb3j.logsNotifications(Collections.emptyList(), Collections.emptyList())
                 .subscribe(
                         this::onLog,
                         err -> log.error("logs 订阅异常", err));
