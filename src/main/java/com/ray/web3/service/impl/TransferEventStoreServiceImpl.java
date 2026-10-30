@@ -36,35 +36,54 @@ public class TransferEventStoreServiceImpl implements TransferEventStoreService 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public long savePage(String contractAddress, long pageToBlock, List<TransferEventDTO> pageEvents) {
-        Long chainId = infuraProperties.getChainId();
         String contract = contractAddress.toLowerCase();
 
         long saved = 0;
         if (pageEvents != null && !pageEvents.isEmpty()) {
-            List<TransferEventLog> rows = toEntities(chainId, contract, pageEvents);
-            for (int from = 0; from < rows.size(); from += INSERT_BATCH_SIZE) {
-                int to = Math.min(from + INSERT_BATCH_SIZE, rows.size());
-                saved += transferEventLogMapper.insertIgnoreBatch(rows.subList(from, to));
-            }
+            saved = insertIgnoreChunks(toEntities(pageEvents));
         }
 
         // 空页同样推进游标：否则补齐会卡在没有 Transfer 的区间，循环永不前进
-        blockSyncStateMapper.upsertCursor(chainId, contract, pageToBlock);
+        blockSyncStateMapper.upsertCursor(infuraProperties.getChainId(), contract, pageToBlock);
 
         log.debug("分页落库 contract={} pageTo={} events={} saved={}",
                 contract, pageToBlock, pageEvents == null ? 0 : pageEvents.size(), saved);
         return saved;
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public long saveEvents(List<TransferEventDTO> events) {
+        if (events == null || events.isEmpty()) {
+            return 0;
+        }
+        long saved = insertIgnoreChunks(toEntities(events));
+        log.debug("实时落库 events={} saved={}", events.size(), saved);
+        return saved;
+    }
+
     /**
-     * DTO → 落库实体：金额以十进制字符串存两列（raw 最小单位 / display 换算值），合约/链维度补齐
+     * 分批幂等写入：每 {@link #INSERT_BATCH_SIZE} 行一条 INSERT IGNORE，累加实际新增行数
      */
-    private List<TransferEventLog> toEntities(Long chainId, String contract, List<TransferEventDTO> events) {
+    private long insertIgnoreChunks(List<TransferEventLog> rows) {
+        long saved = 0;
+        for (int from = 0; from < rows.size(); from += INSERT_BATCH_SIZE) {
+            int to = Math.min(from + INSERT_BATCH_SIZE, rows.size());
+            saved += transferEventLogMapper.insertIgnoreBatch(rows.subList(from, to));
+        }
+        return saved;
+    }
+
+    /**
+     * DTO → 落库实体：金额以十进制字符串存两列（raw 最小单位 / display 换算值），链维度补齐、合约取各 DTO 自带地址
+     */
+    private List<TransferEventLog> toEntities(List<TransferEventDTO> events) {
+        Long chainId = infuraProperties.getChainId();
         List<TransferEventLog> rows = new ArrayList<>(events.size());
         for (TransferEventDTO e : events) {
             TransferEventLog row = new TransferEventLog();
             row.setChainId(chainId);
-            row.setContractAddress(contract);
+            row.setContractAddress(e.contract());
             row.setBlockNumber(e.blockNumber().longValue());
             row.setTransactionHash(e.transactionHash());
             row.setLogIndex(e.logIndex().longValue());

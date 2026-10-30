@@ -8,7 +8,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:web3_backend}?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true
     username: ${MYSQL_USERNAME:root}
-    password: ${MYSQL_PASSWORD:root}
+    password: ${MYSQL_PASSWORD:root123}
     hikari:
       maximum-pool-size: 20
       minimum-idle: 5
@@ -65,8 +65,8 @@ web3:
     # Anvil: ws://127.0.0.1:8545   Infura: wss://mainnet.infura.io/ws/v3/{projectId}
 #    url: ${WEB3_WS_URL:ws://127.0.0.1:8545}
 #    url: wss://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
-    url: wss://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
-#    url: wss://mainnet.infura.io/ws/v3/${ALCHEMY_PROJECT_ID:}
+#    url: wss://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
+    url: wss://mainnet.infura.io/ws/v3/${INFURA_PROJECT_ID:}
 #    url: wss://sepolia.infura.io/ws/v3/${INFURA_PROJECT_ID:}
     # wss 代理：底层 Java-WebSocket 不读系统代理/JVM 代理参数，必须在此显式配置（留空则直连）
     proxy-host: ${WEB3_PROXY_HOST:127.0.0.1}
@@ -75,6 +75,16 @@ web3:
     # 监听 Transfer 日志的合约地址，多个用逗号分隔；留空则监听全链 Transfer（量大慎用）
     watch-contracts: ${WEB3_WATCH_CONTRACTS:0xdac17f958d2ee523a2206206994597c13d831ec7}
 #    watch-contracts: ${WEB3_WATCH_CONTRACTS:}
+    # ===== 模块三：实时订阅引擎（ethLogFlowable + 断线重连）=====
+    # 断线自动重连（指数退避）；隧道 socket 关闭后无法复用，重连即重建整套连接并重新订阅
+    reconnect-enabled: ${WEB3_WS_RECONNECT:true}
+    reconnect-initial-delay-ms: ${WEB3_WS_RECONNECT_INIT_MS:1000}
+    reconnect-max-delay-ms: ${WEB3_WS_RECONNECT_MAX_MS:30000}
+    # ethLogFlowable 轮询间隔(ms)：越小延迟越低但 RPC 越密；节点侧对 filter 有限制时勿设过小
+    polling-interval-ms: ${WEB3_WS_POLLING_MS:30000}
+    # 解码事件内存队列容量 / 工作线程单批落库条数（回调只入队，独立线程批量写库）
+    event-queue-capacity: ${WEB3_WS_QUEUE_CAPACITY:4096}
+    worker-batch-size: ${WEB3_WS_BATCH_SIZE:1000}
 
 # ============ Resilience4j：RPC 容错 ============
 resilience4j:

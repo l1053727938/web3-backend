@@ -36,4 +36,24 @@ public class WebSocketProperties {
 
     /** 要监听 Transfer 日志的合约地址列表；为空则不过滤地址（全链 Transfer，量大慎用） */
     private List<String> watchContracts = new ArrayList<>();
+
+    // ============ 模块三：WebSocket 实时订阅引擎（ethLogFlowable + 断线重连）参数 ============
+
+    /** 断线是否自动重连（网络抖动导致 socket 关闭后按退避重建连接并重新订阅） */
+    private boolean reconnectEnabled = true;
+
+    /** 重连初始退避间隔（毫秒），随后指数递增 */
+    private long reconnectInitialDelayMs = 1000L;
+
+    /** 重连退避上限（毫秒），指数递增封顶于此 */
+    private long reconnectMaxDelayMs = 30000L;
+
+    /** ethLogFlowable 轮询间隔（毫秒）：越小延迟越低但 RPC 越密；默认 3000 */
+    private long pollingIntervalMs = 30000L;
+
+    /** 解码事件内存队列容量：满时丢弃并告警（实时事件以“提前发现”为主，宁可丢回调不可阻塞轮询线程） */
+    private int eventQueueCapacity = 4096;
+
+    /** 工作线程单次批量落库的最大条数：攒批降低 DB 写频率，同时限制单批大小 */
+    private int workerBatchSize = 200;
 }
