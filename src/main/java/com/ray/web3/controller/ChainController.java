@@ -1,21 +1,25 @@
 package com.ray.web3.controller;
 
 import com.ray.web3.model.dto.TransferEventDTO;
+import com.ray.web3.model.entity.DepositWallet;
 import com.ray.web3.model.vo.ApiResponse;
 import com.ray.web3.model.vo.BackfillResultVO;
 import com.ray.web3.model.vo.BalanceVO;
 import com.ray.web3.model.vo.ChainStatusVO;
 import com.ray.web3.model.vo.TransferLogVO;
 import com.ray.web3.service.ChainService;
+import com.ray.web3.service.DepositWalletService;
 import com.ray.web3.service.EventLogService;
 import com.ray.web3.service.HistoryBackfillService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -34,6 +38,9 @@ public class ChainController {
 
     /** 补拉服务受 web3.backfill.enabled 控制，用 ObjectProvider 延迟取得，关闭时不影响应用启动 */
     private final ObjectProvider<HistoryBackfillService> historyBackfillService;
+
+    /** 充值地址配置（模块四）：常规总是存在，依赖异常时用 ObjectProvider 避免拖住启动 */
+    private final ObjectProvider<DepositWalletService> depositWalletService;
 
     @Operation(summary = "链上状态", description = "客户端版本 / 链ID / 最新区块高度 / Gas Price")
     @GetMapping("/status")
@@ -109,6 +116,46 @@ public class ChainController {
         HistoryBackfillService service = historyBackfillService.getIfAvailable();
         if (service == null) {
             throw new IllegalStateException("历史补拉服务未启用（web3.backfill.enabled=false）");
+        }
+        return service;
+    }
+
+    // ============ 模块四：充值业务路由（REQ-BIZ-04） ============
+
+    @Operation(summary = "查询生效中的充值地址配置",
+            description = "返回当前路由使用的全部启用地址（配置中心热钱包 + deposit_wallet 表），地址与限定合约均为小写")
+    @GetMapping("/deposit/wallets")
+    public ApiResponse<List<DepositWallet>> depositWallets() {
+        return ApiResponse.ok(depositWalletService().activeWallets());
+    }
+
+    @Operation(summary = "新增/更新充值地址",
+            description = "按 (chainId, 小写地址) upsert；walletType=HOT 平台热钱包，USER 用户充值地址（必填 userId）；"
+                    + "contract 为空表示任意代币到账均计充值，非空表示仅该合约计入。写完立即失效地址缓存")
+    @PostMapping("/deposit/wallets")
+    public ApiResponse<DepositWallet> saveDepositWallet(@RequestBody DepositWallet wallet) {
+        return ApiResponse.ok(depositWalletService().saveWallet(wallet));
+    }
+
+    @Operation(summary = "停用充值地址", description = "status 置 0，不再路由新充值（历史充值记录保留可追溯）；chainId 为空取当前链")
+    @DeleteMapping("/deposit/wallets/{address}")
+    public ApiResponse<Boolean> disableDepositWallet(@PathVariable String address,
+                                                     @RequestParam(required = false) Long chainId) {
+        return ApiResponse.ok(depositWalletService().disableWallet(chainId, address));
+    }
+
+    @Operation(summary = "强制刷新充值地址缓存", description = "新增/停用地址后无需等 TTL，直接回源重建内存索引")
+    @PostMapping("/deposit/wallets/refresh")
+    public ApiResponse<Integer> refreshDepositWallets() {
+        DepositWalletService service = depositWalletService();
+        service.invalidateCache();
+        return ApiResponse.ok(service.activeWallets().size());
+    }
+
+    private DepositWalletService depositWalletService() {
+        DepositWalletService service = depositWalletService.getIfAvailable();
+        if (service == null) {
+            throw new IllegalStateException("充值地址服务不可用（Redis/MySQL 未就绪）");
         }
         return service;
     }

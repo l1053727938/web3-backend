@@ -6,6 +6,8 @@ import com.ray.web3.model.vo.TransferLogVO;
 import com.ray.web3.service.EventLogService;
 import com.ray.web3.service.RpcCallService;
 import com.ray.web3.service.TokenMetadataService;
+import com.ray.web3.util.ChainParams;
+import com.ray.web3.util.ChainQueryUtils;
 import com.ray.web3.util.TransferEventDecoder;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -34,11 +36,6 @@ import java.util.regex.Pattern;
 @Service
 @RequiredArgsConstructor
 public class EventLogServiceImpl implements EventLogService {
-
-    private static final Pattern ADDRESS_PATTERN = Pattern.compile("^0x[0-9a-fA-F]{40}$");
-
-    /** 交易哈希：0x + 64 位 hex */
-    private static final Pattern TX_HASH_PATTERN = Pattern.compile("^0x[0-9a-fA-F]{64}$");
 
     /** 节点结果数超限错误（如 Infura：query returned more than 10000 results. Try with this block range [0x.., 0x..]） */
     private static final Pattern RESULT_LIMIT_ERROR_PATTERN =
@@ -75,17 +72,15 @@ public class EventLogServiceImpl implements EventLogService {
 
     @Override
     public List<TransferEventDTO> fetchTransferLogPage(String contractAddress, BigInteger fromBlock, BigInteger toBlock) {
-        validateContract(contractAddress);
-        validateRange(fromBlock, toBlock);
+        ChainParams.requireContract(contractAddress);
+        ChainParams.requireRange(fromBlock, toBlock);
         // 补拉按页推进游标：区间以入参为准（链高截断由调用方完成），页内命中节点上限时自动缩跨度续拉
         return decodeAll(contractAddress, fetchLogsAdaptive(contractAddress, fromBlock, toBlock));
     }
 
     @Override
     public List<TransferEventDTO> fetchTransfersByTx(String txHash) {
-        if (txHash == null || !TX_HASH_PATTERN.matcher(txHash).matches()) {
-            throw new IllegalArgumentException("交易哈希格式非法: " + txHash);
-        }
+        ChainParams.requireTxHash(txHash);
         EthGetTransactionReceipt receipt;
         try {
             receipt = web3j.ethGetTransactionReceipt(txHash).send();
@@ -111,16 +106,11 @@ public class EventLogServiceImpl implements EventLogService {
      * 参数校验 + 链上高度截断 + 按块跨度分段循环拉取，返回区间内的原始日志
      */
     private List<Log> collectLogs(String contractAddress, BigInteger fromBlock, BigInteger toBlock) {
-        validateContract(contractAddress);
-        validateRange(fromBlock, toBlock);
+        ChainParams.requireContract(contractAddress);
+        ChainParams.requireRange(fromBlock, toBlock);
 
         // 结束区块不能超过当前链上高度
-        BigInteger latest;
-        try {
-            latest = web3j.ethBlockNumber().send().getBlockNumber();
-        } catch (Exception e) {
-            throw new IllegalStateException("查询最新区块高度失败: " + e.getMessage(), e);
-        }
+        BigInteger latest = ChainQueryUtils.latestBlockNumber(web3j);
         if (toBlock.compareTo(latest) > 0) {
             log.info("toBlock={} 超过链上高度={}，自动截断", toBlock, latest);
             toBlock = latest;
@@ -209,18 +199,6 @@ public class EventLogServiceImpl implements EventLogService {
             TransferEventDecoder.decode(raw, decimals).ifPresent(result::add);
         }
         return result;
-    }
-
-    private void validateContract(String contractAddress) {
-        if (contractAddress == null || !ADDRESS_PATTERN.matcher(contractAddress).matches()) {
-            throw new IllegalArgumentException("合约地址格式非法: " + contractAddress);
-        }
-    }
-
-    private void validateRange(BigInteger fromBlock, BigInteger toBlock) {
-        if (fromBlock == null || toBlock == null || fromBlock.signum() < 0 || fromBlock.compareTo(toBlock) > 0) {
-            throw new IllegalArgumentException("区块区间非法: [" + fromBlock + ", " + toBlock + "]");
-        }
     }
 
     private EthFilter buildFilter(String contractAddress, BigInteger from, BigInteger to) {

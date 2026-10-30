@@ -8,7 +8,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:web3_backend}?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true
     username: ${MYSQL_USERNAME:root}
-    password: ${MYSQL_PASSWORD:root123}
+    password: ${MYSQL_PASSWORD:root}
     hikari:
       maximum-pool-size: 20
       minimum-idle: 5
@@ -81,10 +81,26 @@ web3:
     reconnect-initial-delay-ms: ${WEB3_WS_RECONNECT_INIT_MS:1000}
     reconnect-max-delay-ms: ${WEB3_WS_RECONNECT_MAX_MS:30000}
     # ethLogFlowable 轮询间隔(ms)：越小延迟越低但 RPC 越密；节点侧对 filter 有限制时勿设过小
-    polling-interval-ms: ${WEB3_WS_POLLING_MS:30000}
+    polling-interval-ms: ${WEB3_WS_POLLING_MS:3000}
     # 解码事件内存队列容量 / 工作线程单批落库条数（回调只入队，独立线程批量写库）
     event-queue-capacity: ${WEB3_WS_QUEUE_CAPACITY:4096}
     worker-batch-size: ${WEB3_WS_BATCH_SIZE:1000}
+
+  # ============ 模块四：充值业务路由与落库（REQ-BIZ-04）============
+  deposit:
+    enabled: ${WEB3_DEPOSIT_ENABLED:true}
+    # 下游账务通知频道：入账成功后 PUBLISH deposit_channel {json}，账务系统订阅消费
+    deposit-channel: ${WEB3_DEPOSIT_CHANNEL:deposit_channel}
+    # 配置中心热钱包：key=地址，value=币种符号（留空=任意代币到账均计为该地址充值）
+    # 与数据库 deposit_wallet 表取并集；同地址以 DB 为准，方便在库里精细启停
+    # ⚠ 主网热钱包充值密集，建议用 contract 限定币种（如 USDT 合约地址），避免全量 Transfer 都生成充值记录
+    hot-wallets:
+      0x0fD04a68d3c3A692d6Fa30384D1A87Ef93554eE6: ""
+    # 充值地址缓存回源间隔(ms)：路由按内存索引匹配，到期才回源 DB，避免每个事件打一次 SELECT
+    wallet-cache-refresh-ms: ${WEB3_DEPOSIT_WALLET_TTL_MS:30000}
+    # 确认阈值(区块数)：写入下游消息供账务判断最终确定性，0=不设置
+    confirm-threshold: ${WEB3_DEPOSIT_CONFIRM_THRESHOLD:12}
+    # 批量入库与路由分片大小不再可配：统一取常量 DbConsts.INSERT_BATCH_SIZE（流水表与充值表同口径）
 
 # ============ Resilience4j：RPC 容错 ============
 resilience4j:

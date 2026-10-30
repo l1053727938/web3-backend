@@ -49,7 +49,7 @@ public class WebSocketProperties {
     private long reconnectMaxDelayMs = 30000L;
 
     /** ethLogFlowable 轮询间隔（毫秒）：越小延迟越低但 RPC 越密；默认 3000 */
-    private long pollingIntervalMs = 30000L;
+    private long pollingIntervalMs = 3000L;
 
     /** 解码事件内存队列容量：满时丢弃并告警（实时事件以“提前发现”为主，宁可丢回调不可阻塞轮询线程） */
     private int eventQueueCapacity = 4096;

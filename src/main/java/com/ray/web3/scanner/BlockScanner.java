@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.ray.web3.config.InfuraProperties;
 import com.ray.web3.mapper.BlockSyncStateMapper;
 import com.ray.web3.model.entity.BlockSyncState;
+import com.ray.web3.util.ChainQueryUtils;
 import com.xxl.job.core.handler.annotation.XxlJob;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -55,7 +56,7 @@ public class BlockScanner {
             return;
         }
         try {
-            BigInteger latest = web3j.ethBlockNumber().send().getBlockNumber();
+            BigInteger latest = ChainQueryUtils.latestBlockNumber(web3j);
             Long chainId = infuraProperties.getChainId();
 
             LambdaQueryWrapper<BlockSyncState> wrapper = new LambdaQueryWrapper<BlockSyncState>()

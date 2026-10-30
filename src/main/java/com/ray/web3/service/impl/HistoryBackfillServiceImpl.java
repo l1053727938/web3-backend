@@ -3,23 +3,27 @@ package com.ray.web3.service.impl;
 import com.ray.web3.config.BackfillProperties;
 import com.ray.web3.config.InfuraProperties;
 import com.ray.web3.mapper.TransferEventLogMapper;
+import com.ray.web3.model.DepositConsts;
 import com.ray.web3.model.dto.TransferEventDTO;
 import com.ray.web3.model.vo.BackfillResultVO;
+import com.ray.web3.service.DepositRoutingService;
 import com.ray.web3.service.EventLogService;
 import com.ray.web3.service.HistoryBackfillService;
 import com.ray.web3.service.SyncCursorService;
 import com.ray.web3.service.TransferEventStoreService;
+import com.ray.web3.util.ChainParams;
+import com.ray.web3.util.ChainQueryUtils;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 import org.web3j.protocol.Web3j;
 
 import java.math.BigInteger;
 import java.util.List;
-import java.util.regex.Pattern;
 
 /**
  * 历史补拉编排实现（模块二）：断点续传 + 安全分页 + 分批解码 + 游标同事务推进
@@ -36,8 +40,6 @@ import java.util.regex.Pattern;
 @ConditionalOnProperty(name = "web3.backfill.enabled", havingValue = "true", matchIfMissing = true)
 public class HistoryBackfillServiceImpl implements HistoryBackfillService {
 
-    private static final Pattern ADDRESS_PATTERN = Pattern.compile("^0x[0-9a-fA-F]{40}$");
-
     private static final String LOCK_KEY_PREFIX = "web3:backfill:lock:";
 
     private final Web3j web3j;
@@ -49,10 +51,13 @@ public class HistoryBackfillServiceImpl implements HistoryBackfillService {
     private final BackfillProperties backfillProperties;
     private final RedissonClient redissonClient;
 
+    /** 充值路由（模块四）受 web3.deposit.enabled 控制，用 ObjectProvider 延迟取得，关闭时不影响补拉 */
+    private final ObjectProvider<DepositRoutingService> depositRoutingService;
+
     @Override
     public BackfillResultVO backfill(String contractAddress, BigInteger fromBlock, BigInteger toBlock, Integer chunkSize) {
-        validateContract(contractAddress);
-        validateRange(fromBlock, toBlock);
+        ChainParams.requireContract(contractAddress);
+        ChainParams.requireRange(fromBlock, toBlock);
 
         String contract = contractAddress.toLowerCase();
         int chunk = (chunkSize != null && chunkSize > 0) ? chunkSize : backfillProperties.getChunkSize();
@@ -72,14 +77,14 @@ public class HistoryBackfillServiceImpl implements HistoryBackfillService {
 
     @Override
     public Long currentCursor(String contractAddress) {
-        validateContract(contractAddress);
+        ChainParams.requireContract(contractAddress);
         return syncCursorService.readCursor(contractAddress.toLowerCase());
     }
 
     @Override
     public Long savedTransferCount(String contractAddress, BigInteger fromBlock, BigInteger toBlock) {
-        validateContract(contractAddress);
-        validateRange(fromBlock, toBlock);
+        ChainParams.requireContract(contractAddress);
+        ChainParams.requireRange(fromBlock, toBlock);
         return transferEventLogMapper.countInRange(
                 infuraProperties.getChainId(), contractAddress.toLowerCase(),
                 fromBlock.longValue(), toBlock.longValue());
@@ -90,7 +95,7 @@ public class HistoryBackfillServiceImpl implements HistoryBackfillService {
      */
     private BackfillResultVO doBackfill(String contract, BigInteger fromBlock, BigInteger toBlock, int chunk) {
         // 结束区块以链上高度截断（本层负责，页拉取层不截断）
-        BigInteger latest = queryLatestBlock();
+        BigInteger latest = ChainQueryUtils.latestBlockNumber(web3j);
         long endBlock = toBlock.min(latest).longValue();
 
         // 断点续传起点：已有游标且落在 [fromBlock, ...] 内时从游标 +1 续拉，否则从 fromBlock 起
@@ -128,6 +133,8 @@ public class HistoryBackfillServiceImpl implements HistoryBackfillService {
             long pageSaved = transferEventStoreService.savePage(contract, pageTo, pageEvents);
             // 事务提交后刷新 Redis 读加速副本（滞后不影响正确性，下次回源自愈）
             syncCursorService.cacheCursor(contract, pageTo);
+            // 模块四充值路由：必须在落库事务提交后执行，补拉重放区间靠唯一键幂等不会重复入账
+            routeDeposits(pageEvents);
 
             pages++;
             fetched += pageEvents.size();
@@ -145,23 +152,19 @@ public class HistoryBackfillServiceImpl implements HistoryBackfillService {
         return new BackfillResultVO(contract, startBlock, endBlock, pages, fetched, saved, lastProcessed, limited);
     }
 
-    private BigInteger queryLatestBlock() {
+    /**
+     * 模块四充值路由：路由异常只记日志，不能因账务侧（DB/Redis）故障中断整段补拉、留下游标空洞
+     */
+    private void routeDeposits(List<TransferEventDTO> pageEvents) {
+        DepositRoutingService service = depositRoutingService.getIfAvailable();
+        if (service == null || pageEvents.isEmpty()) {
+            return;
+        }
         try {
-            return web3j.ethBlockNumber().send().getBlockNumber();
+            service.route(pageEvents, DepositConsts.Source.BACKFILL);
         } catch (Exception e) {
-            throw new IllegalStateException("查询最新区块高度失败: " + e.getMessage(), e);
-        }
-    }
-
-    private void validateContract(String contractAddress) {
-        if (contractAddress == null || !ADDRESS_PATTERN.matcher(contractAddress).matches()) {
-            throw new IllegalArgumentException("合约地址格式非法: " + contractAddress);
-        }
-    }
-
-    private void validateRange(BigInteger fromBlock, BigInteger toBlock) {
-        if (fromBlock == null || toBlock == null || fromBlock.signum() < 0 || fromBlock.compareTo(toBlock) > 0) {
-            throw new IllegalArgumentException("区块区间非法: [" + fromBlock + ", " + toBlock + "]");
+            log.error("[deposit] 补拉充值路由失败 {} 条（流水已入库，可重跑本区间补齐）: {}",
+                    pageEvents.size(), e.getMessage(), e);
         }
     }
 }

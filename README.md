@@ -1,7 +1,8 @@
 # web3-backend
 
 > 基于 **Web3j 6 + Infura** 的以太坊后端骨架，面向钱包 / 充值提币 / 链上数据查询场景。
-> 已提供 9 个链上查询/补拉 REST 接口、区块扫描进度落库、ERC-20 Transfer 事件解码入库（断点续传 + 幂等）、以及 WebSocket（`eth_subscribe`）实时区块/转账监听。
+> 已提供 13 个链上查询/补拉/充值配置 REST 接口、区块扫描进度落库、ERC-20 Transfer 事件解码入库（断点续传 + 幂等）、WebSocket
+> （`eth_subscribe`）实时区块/转账监听，以及充值业务闭环（热钱包匹配 → 幂等入账 → Redis 通知下游）。
 
 - JDK 21 + Spring Boot 4.1.2 + Spring 7.0.10 + MySQL/Redis + MyBatis-Plus + Web3j 6.1.0 + Infura
 - 技术选型详解见 [`docs/技术选型.md`](docs/技术选型.md)
@@ -27,10 +28,12 @@
 - **统一响应与异常处理**：`ApiResponse` 封装 + `GlobalExceptionHandler`（RPC 类异常统一转 `502`）
 - **API 文档**：SpringDoc OpenAPI 3.1（`/swagger-ui.html`、`/v3/api-docs`）
 - **可观测性**：Actuator + Micrometer Prometheus
-- **离线单元测试**：37 个 JUnit 5 + Mockito 用例（不依赖真实节点/DB/Redis），`mvn test` 全绿
+- **离线单元测试**：13 个 JUnit 5 + Mockito 用例（不依赖真实节点/DB/Redis，覆盖模块四充值路由、热钱包匹配与参数校验口径），`mvn test` 全绿
+- **充值业务路由与落库（模块四）**：实时/补拉解出的 Transfer 事件按 `to` 地址比对平台热钱包与用户充值地址（配置中心 + `deposit_wallet` 表），
+  命中则以 `(chain_id, txHash, logIndex)` 唯一键幂等写入 `deposit_record`（状态**待确认**），随后 `PUBLISH deposit_channel {json}` 通知下游账务（详见 [5.11](#511-充值业务路由与落库模块四)）
 
 ### 规划中
-- 充值事件由 WS 推送直写流水表（当前落库走补拉的区间重扫，重组回滚尚未实现）、提币服务、多链扩展、托管钱包
+- 提币服务、多链扩展、托管钱包；充值确认推进（`PENDING_CONFIRM → CREDITED`）与 `notify_status=FAILED` 的定时重发补偿
 
 ---
 
@@ -71,14 +74,16 @@
 │              EventLogService + RpcCallService（rpc-segment）│
 │              HistoryBackfillService（补拉编排 + Redisson 互斥）│
 │              SyncCursorService / TransferEventStoreService  │
+│              DepositWalletService + DepositRoutingService（模块四）│
 ├───────────┬──────────────────┬───────────────────────────┤
 │ web3j     │ wsWeb3j          │ Scanner（Scheduler/XXL-Job  │
 │ (HTTP RPC │ (WebSocket 长连接 │  + Redisson 锁)            │
 │  OkHttp)  │  newHeads/logs)  │  区块轮询 → 进度落库         │
 ├───────────┴──────────────────┴───────────────────────────┤
 │  持久层  MyBatis-Plus → MySQL（block_sync_state /          │
-│         transfer_event_log，游标与事件同事务）             │
-│  缓存/锁 → Redis（游标缓存 + Redisson 锁）                  │
+│         transfer_event_log，游标与事件同事务；             │
+│         deposit_wallet / deposit_record 充值闭环）        │
+│  缓存/锁 → Redis（游标缓存 + Redisson 锁 + deposit_channel）  │
 ├──────────────────────────────────────────────────────────┤
 │  可观测  Actuator + Prometheus     文档  Swagger UI         │
 └──────────────────────────────────────────────────────────┘
@@ -92,7 +97,7 @@
 ```
 web3-backend
 ├── pom.xml
-├── sql/schema.sql                            # MySQL 初始化脚本（两张表）
+├── sql/schema.sql                            # MySQL 初始化脚本（四张表）
 ├── docs/技术选型.md                            # 技术选型详解
 └── src/main/java/com/ray/web3
     ├── Web3BackendApplication.java           # 启动类（@EnableScheduling + @MapperScan）
@@ -100,12 +105,16 @@ web3-backend
     │   ├── InfuraProperties.java             # web3.infura.* 配置绑定（含代理项、log-chunk-size）
     │   ├── BackfillProperties.java           # web3.backfill.*（开关/单页跨度/单次上限/游标缓存）
     │   ├── WebSocketProperties.java          # web3.websocket.* 配置绑定（url/代理/订阅开关/合约列表）
+    │   ├── DepositProperties.java            # web3.deposit.*（开关/频道/配置侧热钱包/缓存 TTL/确认阈值）
     │   ├── Web3jConfig.java                  # HTTP Web3j Bean（OkHttp 可选代理）
     │   ├── WebSocketConfig.java              # WebSocketService + wsWeb3j Bean（CONNECT 隧道注入）
     │   ├── RedisConfig.java                  # RedisTemplate 序列化（Jackson 3）
+    │   ├── DepositConfig.java                # 注册 DepositProperties
     │   └── XxlJobConfig.java                 # XXL-Job 执行器（xxl.job.enabled=true 才加载）
     ├── consts/EventConsts.java               # ERC-20 Transfer 事件定义（ABI 编码用）
-    ├── controller/ChainController.java       # 链上查询 + 历史补拉 REST API（9 个端点）
+    ├── consts/PatternConsts.java             # 地址/交易哈希校验正则（各 Service 共用）
+    ├── consts/DbConsts.java                  # 批量入库行数常量（全项目单一口径）
+    ├── controller/ChainController.java       # 链上查询 + 历史补拉 + 充值地址配置 REST API（13 个端点）
     ├── listener/ChainEventListener.java      # WS 实时订阅（newHeads + logs）
     ├── service/
     │   ├── ChainService.java                 # 链上查询接口
@@ -114,6 +123,8 @@ web3-backend
     │   ├── TokenMetadataService.java         # 代币精度 decimals() 读取与缓存
     │   ├── SyncCursorService.java            # 补拉游标读写（MySQL 事实 + Redis 缓存）
     │   ├── TransferEventStoreService.java    # 分页事件落库 + 游标同事务推进
+    │   ├── DepositWalletService.java         # 热钱包/用户充值地址匹配（内存索引 + TTL 回源）
+    │   ├── DepositRoutingService.java        # 充值路由：匹配 → 幂等入账 → Redis 发布
     │   ├── HistoryBackfillService.java       # 历史补拉编排入口
     │   └── impl/
     │       ├── ChainServiceImpl.java         # Web3j 调用 + @Retry/@CircuitBreaker("rpc")
@@ -122,17 +133,26 @@ web3-backend
     │       ├── TokenMetadataServiceImpl.java # 链上读精度并缓存
     │       ├── SyncCursorServiceImpl.java    # 游标 upsert/回源 + 缓存降级
     │       ├── TransferEventStoreServiceImpl.java # INSERT IGNORE 分批写入
+    │       ├── DepositWalletServiceImpl.java     # 配置+DB 并集的小写地址索引
+    │       ├── DepositRoutingServiceImpl.java    # 待确认入账 + deposit_channel 发布
     │       └── HistoryBackfillServiceImpl.java # 逐页推进 + Redisson 互斥
     ├── scanner/BlockScanner.java             # 区块扫描器（双触发 + 分布式锁）
     ├── mapper/
     │   ├── BlockSyncStateMapper.java         # 游标 upsert（GREATEST 单调前移）/ 回读
-    │   └── TransferEventLogMapper.java       # INSERT IGNORE 批量写 + 对账计数
+    │   ├── TransferEventLogMapper.java       # INSERT IGNORE 批量写 + 对账计数
+    │   ├── DepositWalletMapper.java          # 启用充值地址全量加载（供缓存）
+    │   └── DepositRecordMapper.java          # 充值记录 INSERT IGNORE + 幂等回读 + 通知状态更新
     ├── model/
     │   ├── entity/BlockSyncState.java        # 扫描进度/补拉游标实体
     │   ├── entity/TransferEventLog.java      # Transfer 流水实体
+    │   ├── entity/DepositWallet.java         # 充值地址配置实体
+    │   ├── entity/DepositRecord.java         # 充值记录实体（状态待确认）
+    │   ├── DepositConsts.java                # 地址类型/充值状态/来源/通知状态常量
     │   ├── dto/TransferEventDTO.java         # 解码后的 Transfer 事件
-    │   └── vo/                               # ApiResponse / ChainStatusVO / BalanceVO / TransferLogVO / BackfillResultVO
+    │   └── vo/                               # ApiResponse / ChainStatusVO / BalanceVO / TransferLogVO / BackfillResultVO / DepositEventVO
     ├── util/
+    │   ├── ChainParams.java                  # 入参校验（合约地址/交易哈希/区块区间，统一抛 IllegalArgumentException）
+    │   ├── ChainQueryUtils.java              # 无状态链上查询封装（最新区块高度 + 异常转译）
     │   ├── ProxyTunnel.java                  # HTTP CONNECT 隧道 + TLS 升级（wss 代理穿透）
     │   └── TransferEventDecoder.java         # topic[0] 计算 + 日志→TransferEventDTO 解码
     └── exception/GlobalExceptionHandler.java # 校验/参数/RPC/交易异常统一响应
@@ -155,6 +175,10 @@ web3-backend
 | POST | `/api/chain/logs/transfer/backfill/{contract}` | **历史补拉（断点续传）**：游标之后分页拉取并落库，可选 `chunkSize` query 参数临时调小单页跨度 |
 | GET | `/api/chain/logs/cursor/{contract}` | 查询该合约补拉游标 `lastProcessedBlock`（Redis 命中优先，未命中回源 MySQL，无记录返回 null） |
 | GET | `/api/chain/logs/transfer/saved-count/{contract}` | 对账：统计区间内已入库 Transfer 条数，与链上拉取条数比对确认不漏单 |
+| GET | `/api/chain/deposit/wallets` | 当前路由生效中的充值地址配置（配置中心热钱包 + `deposit_wallet` 表的并集） |
+| POST | `/api/chain/deposit/wallets` | 新增/更新充值地址（JSON 体），按 `(chainId, 小写地址)` upsert，写完立即失效地址缓存 |
+| DELETE | `/api/chain/deposit/wallets/{address}` | 停用充值地址（`status=0`，历史充值记录保留）；`chainId` 为空取当前链 |
+| POST | `/api/chain/deposit/wallets/refresh` | 强制回源重建地址内存索引（新增/停用后无需等 TTL），返回生效地址数 |
 
 **示例**
 
@@ -172,6 +196,16 @@ curl -X POST "http://localhost:8080/api/chain/logs/transfer/backfill/0xdac17f958
 # 对账：已入库条数与游标
 curl "http://localhost:8080/api/chain/logs/transfer/saved-count/0xdac17f958d2ee523a2206206994597c13d831ec7?fromBlock=18000000&toBlock=18001000"
 curl  "http://localhost:8080/api/chain/logs/cursor/0xdac17f958d2ee523a2206206994597c13d831ec7"
+
+# 充值地址：登记一个限定 USDT 合约的平台热钱包，然后查看生效配置
+# contract 留空则任意代币到账均计为该地址充值；walletType=USER 时必须带 userId
+curl -X POST http://localhost:8080/api/chain/deposit/wallets \
+  -H "Content-Type: application/json" \
+  -d '{"address":"0x0fD04a68d3c3A692d6Fa30384D1A87Ef93554eE6","walletType":"HOT","currency":"USDT","contract":"0xdac17f958d2ee523a2206206994597c13d831ec7"}'
+curl http://localhost:8080/api/chain/deposit/wallets
+
+# 下游订阅验证：另一个终端先 SUBSCRIBE，命中热钱包的转账入库后会收到一条 PENDING_CONFIRM 消息
+redis-cli SUBSCRIBE deposit_channel
 ```
 
 **响应示例**
@@ -307,7 +341,7 @@ web3:
 | 组件 | 职责 | 关键点 |
 |---|---|---|
 | `SyncCursorService` | 游标读写 | MySQL 为事实来源，Redis（`web3:sync:cursor:{chainId}:{addr}`）只作读加速；地址统一小写归一；Redis 不可用自动降级直读 DB；`upsertCursor` 用 `ON DUPLICATE KEY UPDATE` + `GREATEST` 保证游标**单调前移** |
-| `TransferEventStoreService` | 分页落库 | `@Transactional(rollbackFor = Exception.class)`；每 500 行一批 `INSERT IGNORE`；**空页不发 SQL 但照常推进游标**（否则补齐会卡在没有日志的区间） |
+| `TransferEventStoreService` | 分页落库 | `@Transactional(rollbackFor = Exception.class)`；每 1000 行（`DbConsts.INSERT_BATCH_SIZE`）一批 `INSERT IGNORE`；**空页不发 SQL 但照常推进游标**（否则补齐会卡在没有日志的区间） |
 | `HistoryBackfillService` | 编排 | Redisson `tryLock`（`web3:backfill:lock:{chainId}:{addr}`）同合约互斥；`toBlock` 超链高截断；`from = max(startBlock, cursor + 1)`；`max-blocks-per-run` 限幅后下次从游标自动续拉 |
 
 **不变量与失败语义**
@@ -362,9 +396,78 @@ web3:
 | `uk_chain_tx_log` | `(chain_id, transaction_hash, log_index)` 唯一键，`INSERT IGNORE` 的幂等根据 |
 | `idx_contract_block` | `(contract_address, block_number)`，对账计数走这个索引 |
 
+`DepositWallet`（表 `deposit_wallet`）是充值路由的地址配置：
+
+| 列 | 说明 |
+|---|---|
+| `address` | 充值地址（小写），匹配按 `to_address` 等值命中 |
+| `wallet_type` | `HOT`=平台热钱包，`USER`=用户专属充值地址 |
+| `user_id` | 归属用户，`wallet_type=USER` 时必填 |
+| `contract` | 限定代币合约；NULL=任意代币到账均计充值（防币种串账） |
+| `status` | 1=启用，0=停用（不再路由新充值，历史记录保留） |
+| `uk_chain_address` | `(chain_id, address)` 唯一键，`saveWallet` 的 upsert 冲突键 |
+
+`DepositRecord`（表 `deposit_record`）是充值入账记录（验收口径：命中平台地址即新增一条 `PENDING_CONFIRM`）：
+
+| 列 | 说明 |
+|---|---|
+| `deposit_no` | 充值单号（`DP` + 时间戳 + 64bit 随机），对外业务主键 |
+| `uk_chain_tx_log` | `(chain_id, transaction_hash, log_index)`，**幂等根据**：重连重放/分页重叠/实时与补拉双写只入账一次 |
+| `wallet_type` / `user_id` / `currency` | 命中地址的类型、归属与币种 |
+| `block_number` | 入账区块高度，确认数 = 链上最新高度 - 此值 |
+| `raw_value` / `display_value` / `decimals` | 金额与精度快照（同流水表用 `VARCHAR`，容纳 `uint256`） |
+| `status` | `PENDING_CONFIRM`（待确认）/ `CREDITED`（已入账）/ `INVALID`（重组作废） |
+| `notify_status` / `notify_at` | 下游发布状态 `INIT`/`SENT`/`FAILED`，`FAILED` 可据此补偿重发 |
+| `event_source` | `STREAM`=WebSocket 实时订阅，`BACKFILL`=历史补拉 |
+
 ### 5.10 安全与密钥
 - 私钥严禁硬编码：本地用环境变量/`.env`（勿提交），生产建议 Vault 或托管钱包（Fireblocks/Turnkey）。
 - keystore 文件已在 `.gitignore` 排除（`wallet/`、`*.keystore`）。
+
+### 5.11 充值业务路由与落库（模块四）
+把“链上解析出的 Transfer 事件”变成“平台充值记录”，`DepositRoutingService.route(events, source)` 三步一体；
+实时链路（`TransferStreamEngine` 工作线程）与补拉链路（`HistoryBackfillServiceImpl` 逐页）均在**落库事务提交后**调用它。
+
+**1. 热钱包匹配**（`DepositWalletService`）
+- 地址两个来源取并集：配置中心 `web3.deposit.hot-wallets`（少量平台归集地址）+ `deposit_wallet` 表（用户地址量大/频变）；
+  **同地址以 DB 为准**，否则运维在库里停用地址会被配置文件兜底“复活”。
+- 全量启用地址按小写地址建 **内存 HashMap**，按 `wallet-cache-refresh-ms`（默认 30s）TTL 懒回源；
+  匹配不能逐事件打 DB，否则实时链路落库线程会被 SELECT 拖垮。`POST /api/chain/deposit/wallets/refresh` 可强制回源。
+- `contract` 非空时额外限定代币合约（大小写不敏感等值），避免一个地址多币种串账。
+- 回源失败沿用上一份缓存并退避重试，缓存层故障不拖垮充值链路；首启就失败则为空索引（不产生充值，而不是错配）。
+
+**2. 幂等保证**
+- 写入以 `INSERT IGNORE` + 唯一键 `(chain_id, transaction_hash, log_index)` 进 `deposit_record`：重连重放、
+  补拉分页重叠、实时与补拉双写都只新增一行；`deposit_no` 另有唯一键，而 `INSERT IGNORE` 会把“单号重复”也当作重复行静默丢弃，
+  所以单号必须用 64bit 随机量保证结构上不可能碰撞。
+- 新增行统一按幂等键回读一次：既拿到自增 id（`notify_status` 需按行更新），也过滤掉被 IGNORE 的重复行。
+- 多实例并发路由同一笔事件时 `INSERT IGNORE` 仍可能抛唯一键冲突：逐行回读，金额/地址一致则当正常入账，
+  不一致则 ERROR 告警等人工裁决（**不自动覆盖**，同一幂等键不同金额属链上异常）。
+
+**3. 入账触发（下游通知）**
+- 先落库后 `PUBLISH deposit_channel {json}`（载荷 `DepositEventVO`，走 `StringRedisTemplate.convertAndSend`，消息体为可直接阅读的 JSON 字符串）。
+  反过来“先发布后落库”会让落库失败时下游收到一笔不存在的充值，账务对不平。
+- 只有“真正新增”的行才发布；发布成功置 `notify_status=SENT`，失败置 `FAILED`（充值记录已提交，不受影响），可据此补偿重发。
+- 新记录状态固定 `PENDING_CONFIRM`（待确认）；`confirm-threshold`（默认 12 块）随消息下发供下游判断最终确定性，
+  确认推进（`CREDITED`）与 `FAILED` 重发属后续任务，本期只留字段与常量，不在路由环节做链上高度回查。
+- 路由异常在两条链路上都单独兜住（只记 ERROR）：账务侧故障不能中断实时订阅入队，也不能打断整段补拉留下游标空洞；
+  缺失部分由补拉重跑区间自然补齐（幂等）。
+
+### 5.12 重复口径收拢（`PatternConsts` / `ChainParams` / `ChainQueryUtils`）
+地址正则、区块区间校验、取最新块高原先在 3~4 个 Service 里各写一份，现已集中；新增接口直接复用，不再复制粘贴：
+
+| 位置 | 提供 | 说明 |
+|---|---|---|
+| `consts/PatternConsts` | `ADDRESS_PATTERN` / `LOOSE_ADDRESS_PATTERN` / `TX_HASH_PATTERN` 与 `isAddress` / `isLooseAddress` / `isTxHash` | 地址刻意分两口径：严格 `^0x` 给直透节点的入参（`0X` 会被节点当非法 hex，本地早拦省一次 RPC）；`^0[xX]` 容错版给“先 `toLowerCase` 再入库/匹配”的充值地址录入（运维手写常见 `0X`） |
+| `util/ChainParams` | `requireContract` / `requireTxHash` / `requireRange` | 取代之前的 `validateContract` / `validateRange` 私有重复方法；校验失败统一抛 `IllegalArgumentException` → `GlobalExceptionHandler` 转 400 |
+| `util/ChainQueryUtils` | `latestBlockNumber(Web3j)` | 取代之前的 `queryLatestBlock` 与四处重写的 `ethBlockNumber().send()` 样板；异常统一转 `IllegalStateException`（→ 502） |
+| `consts/DbConsts` | `INSERT_BATCH_SIZE = 1000` | 单条 `INSERT IGNORE` 的最大行数，流水表与充值表共用；同时用作充值路由的分片大小。**已从配置移除**（`web3.deposit.route-batch-size` 不再存在）：批大小只受 `max_allowed_packet` 与单行宽度约束，属于容量参数而非业务开关，放进配置只会让各环境取值漂移、排查时多一个变量 |
+
+> 弹性注解仍不能下放到工具类：静态方法上的 `@Retry/@CircuitBreaker` 不会被 AOP 拦截，
+> 所以 `ChainServiceImpl.latestBlockNumber()` 依旧靠方法上的 `@Retry("rpc")` 重试，复用工具方法不影响策略生效。
+
+未收拢：`EventLogServiceImpl` 里的 `RESULT_LIMIT_ERROR_PATTERN` / `RANGE_LIMIT_ERROR_PATTERN`（解析节点报错文案里的建议区间）
+只服务“自适应缩跨度”一处，搬到公共类会把节点报错格式这个实现细节外泄，所以留在本地。
 
 ---
 
@@ -383,8 +486,9 @@ web3:
 ```bash
 mysql -u root -p < sql/schema.sql
 ```
-脚本会建 `web3_backend` 库与两张表：`block_sync_state`（扫描进度/补拉游标）、`transfer_event_log`（Transfer 流水）。
-已跑过旧版本脚本的库，补执行 `transfer_event_log` 建表语句即可。
+脚本会建 `web3_backend` 库与四张表：`block_sync_state`（扫描进度/补拉游标）、`transfer_event_log`（Transfer 流水）、
+`deposit_wallet`（平台热钱包/用户充值地址）、`deposit_record`（充值入账记录）。
+已跑过旧版本脚本的库，补执行 `transfer_event_log`（或模块四新增的两张充值表）建表语句即可。
 
 ### 6.3 编译打包（PowerShell）
 ```powershell
@@ -414,6 +518,9 @@ java -jar target/web3-backend-1.0.0-SNAPSHOT.jar
 | 历史补拉 | `POST http://localhost:8080/api/chain/logs/transfer/backfill/{contract}?fromBlock=&toBlock=` |
 | 补拉游标 | `GET http://localhost:8080/api/chain/logs/cursor/{contract}` |
 | 入库对账 | `GET http://localhost:8080/api/chain/logs/transfer/saved-count/{contract}?fromBlock=&toBlock=` |
+| 充值地址配置 | `GET` / `POST http://localhost:8080/api/chain/deposit/wallets`（停用：`DELETE /deposit/wallets/{address}`） |
+| 充值地址刷新 | `POST http://localhost:8080/api/chain/deposit/wallets/refresh` |
+| 下游充值消息 | `redis-cli SUBSCRIBE deposit_channel`（入账后收到 `PENDING_CONFIRM` 消息） |
 | Swagger UI | `http://localhost:8080/swagger-ui.html` |
 | OpenAPI 描述 | `http://localhost:8080/v3/api-docs` |
 | 健康检查 | `http://localhost:8080/actuator/health` |
@@ -455,6 +562,11 @@ java -jar target/web3-backend-1.0.0-SNAPSHOT.jar
 | `web3.websocket.proxy-port` | `WEB3_PROXY_PORT` | `7890` | wss 的 CONNECT 隧道代理端口 |
 | `web3.websocket.subscribe-new-heads` | — | true | 是否订阅 `newHeads` |
 | `web3.websocket.watch-contracts` | `WEB3_WATCH_CONTRACTS` | USDT 合约 | 监听 Transfer 的合约列表，逗号分隔；留空=全部合约 |
+| `web3.deposit.enabled` | `WEB3_DEPOSIT_ENABLED` | true | 是否启用充值路由与落库（关闭后只写流水表，不产生充值记录） |
+| `web3.deposit.deposit-channel` | `WEB3_DEPOSIT_CHANNEL` | `deposit_channel` | 下游账务通知的 Redis 频道 |
+| `web3.deposit.hot-wallets` | — | 空（示例注释一个地址） | 配置中心热钱包：key=地址，value=币种符号（留空=不限合约）；与 `deposit_wallet` 表取并集，同地址以 DB 为准 |
+| `web3.deposit.wallet-cache-refresh-ms` | `WEB3_DEPOSIT_WALLET_TTL_MS` | 30000 | 充值地址缓存回源间隔（路由按内存索引匹配，避免每事件一次 SELECT） |
+| `web3.deposit.confirm-threshold` | `WEB3_DEPOSIT_CONFIRM_THRESHOLD` | 12 | 确认阈值（区块数），随消息下发供下游判断最终确定性；0=不设置 |
 | `resilience4j.retry/circuitbreaker.instances.rpc` | — | 3 次 / 500ms，窗口 20、阈值 50%、开路 30s | 链上查询容错 |
 | `resilience4j.retry/circuitbreaker.instances.rpc-segment` | — | 5 次 / 指数退避 ×2 + 抖动 0.5，熔断同上 | 单段 `eth_getLogs` 容错 |
 | `resilience4j.ratelimiter.instances.rpc-segment` | — | 5 次/秒，等待上限 5s | 主动平滑 RPC 吞吐，避免 Infura 429 |
@@ -494,6 +606,29 @@ A：`web3.backfill.enabled=false` 时服务 Bean 不加载，Controller 用 `Obj
 **Q：几千上万块的大区间一次跑不完怎么办？**
 A：把 `WEB3_BACKFILL_MAX_BLOCKS` 设为正数（如 10000）限幅，单次只推进到上限并在响应里返回 `limited=true`、`cursorAfter=…`，
 下次用同一 `fromBlock` 重新调用会从游标自动接着跑，无需人工记位。
+
+**Q：充值会重复入账吗？下游会不会收到两条同样消息？**
+A：不会。`deposit_record` 上 `(chain_id, transaction_hash, log_index)` 唯一键 + `INSERT IGNORE`，只有真正新增的行才发 `deposit_channel`，
+重连重放、补拉分页重叠、实时与补拉双写都只通知一次；消息体带 `depositNo`，下游可按此再做一层幂等。验证：重跑同一补拉区间，
+日志里 `matched>0` 而 `inserted=0`、`published=0`，`SELECT COUNT(*) FROM deposit_record` 不变。
+
+**Q：Redis 挂了会不会丢充值？**
+A：不会丢入账，只会暂时收不到通知。先落库再发布，发布失败只把 `notify_status` 置 `FAILED`（充值行已提交），
+后续按 `notify_status='FAILED'` 补偿重发即可；而路由自身报错不会拖垮实时订阅与补拉（流水已入库，重跑区间可补齐）。
+
+**Q：热钱包地址加了却不生成充值记录？**
+A：先看路由索引里有没有它：`curl http://localhost:8080/api/chain/deposit/wallets`（或先调 `POST /deposit/wallets/refresh`）。
+常见原因是地址写了大写、`status=0`，或配了 `contract` 但事件来自另一个代币（串账隔离是有意行为）。
+配置中心 `web3.deposit.hot-wallets` 与 DB 同地址时以 DB 为准，库里停用不会被配置文件“兜底复活”。
+
+**Q：为什么全部充值都是 `PENDING_CONFIRM`？**
+A：本期只负责“发现即入账”，确认推进（`CREDITED`）属于确认任务的范围，`confirm-threshold` 已随消息下发供下游自行判断；
+链重组则置 `INVALID`（需额外的回退机制，见“规划中”）。
+
+**Q：为什么有的接口接受 `0X...` 地址、有的却报参数非法？**
+A：设两口径（见 [5.12](#512-重复口径收拢patternconsts--chainparams--chainqueryutils)）。日志/补拉类接口的合约地址会原样拼进 `eth_getLogs` 发给节点，
+所以只收严格 `^0x`；充值地址配置（`POST /api/chain/deposit/wallets` 与 `web3.deposit.hot-wallets`）会先归一小写再入库/匹配，
+因此 `0X` 前缀也接受。大写十六进制字母（EIP-55 校验和地址）两边都能识别。
 
 **Q：配置好 Infura URL 后接口/扫描超时，但浏览器/curl 能访问？**
 A：本机开了系统代理（如 Clash `127.0.0.1:7890`），OkHttp 不读系统代理。设置 `WEB3_PROXY_HOST` / `WEB3_PROXY_PORT` 让 web3j 经代理访问。生产海外服务器通常直连即可。

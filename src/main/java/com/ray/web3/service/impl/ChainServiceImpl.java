@@ -4,6 +4,7 @@ import com.ray.web3.config.InfuraProperties;
 import com.ray.web3.model.vo.BalanceVO;
 import com.ray.web3.model.vo.ChainStatusVO;
 import com.ray.web3.service.ChainService;
+import com.ray.web3.util.ChainQueryUtils;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.retry.annotation.Retry;
 import lombok.RequiredArgsConstructor;
@@ -41,11 +42,8 @@ public class ChainServiceImpl implements ChainService {
     @Retry(name = "rpc")
     @CircuitBreaker(name = "rpc")
     public BigInteger latestBlockNumber() {
-        try {
-            return web3j.ethBlockNumber().send().getBlockNumber();
-        } catch (Exception e) {
-            throw new IllegalStateException("查询最新区块高度失败: " + e.getMessage(), e);
-        }
+        // 重试/熔断仍挂在本 Bean 方法上（AOP 不拦截静态工具方法），这里只收拢取数与异常转译
+        return ChainQueryUtils.latestBlockNumber(web3j);
     }
 
     @Override

@@ -1,6 +1,7 @@
 package com.ray.web3.service.impl;
 
 import com.ray.web3.config.InfuraProperties;
+import com.ray.web3.consts.DbConsts;
 import com.ray.web3.mapper.BlockSyncStateMapper;
 import com.ray.web3.mapper.TransferEventLogMapper;
 import com.ray.web3.model.dto.TransferEventDTO;
@@ -18,16 +19,13 @@ import java.util.List;
  * 分页落库实现：事件写入与游标推进同事务提交
  * <p>
  * 事件走 INSERT IGNORE + 唯一键做幂等（重放安全靠数据库约束，不依赖分布式事务）；
- * 每 500 行一批控制单语句包大小，避免超出 MySQL max_allowed_packet；
+ * 单语句行数受 {@link DbConsts#INSERT_BATCH_SIZE} 约束，避免超出 MySQL max_allowed_packet；
  * 游标用 upsertCursor 的 GREATEST 语义，保证只向前单调推进
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class TransferEventStoreServiceImpl implements TransferEventStoreService {
-
-    /** 单条 INSERT 语句的最大行数：控制包大小，防止批量拼接口超 max_allowed_packet 被拒 */
-    private static final int INSERT_BATCH_SIZE = 500;
 
     private final TransferEventLogMapper transferEventLogMapper;
     private final BlockSyncStateMapper blockSyncStateMapper;
@@ -63,12 +61,13 @@ public class TransferEventStoreServiceImpl implements TransferEventStoreService 
     }
 
     /**
-     * 分批幂等写入：每 {@link #INSERT_BATCH_SIZE} 行一条 INSERT IGNORE，累加实际新增行数
+     * 分批幂等写入：每 {@link DbConsts#INSERT_BATCH_SIZE} 行一条 INSERT IGNORE，累加实际新增行数
+     * （与模块四充值表共用同一常量，两条链路不会因环境配置不同而拼出不同大小的包）
      */
     private long insertIgnoreChunks(List<TransferEventLog> rows) {
         long saved = 0;
-        for (int from = 0; from < rows.size(); from += INSERT_BATCH_SIZE) {
-            int to = Math.min(from + INSERT_BATCH_SIZE, rows.size());
+        for (int from = 0; from < rows.size(); from += DbConsts.INSERT_BATCH_SIZE) {
+            int to = Math.min(from + DbConsts.INSERT_BATCH_SIZE, rows.size());
             saved += transferEventLogMapper.insertIgnoreBatch(rows.subList(from, to));
         }
         return saved;

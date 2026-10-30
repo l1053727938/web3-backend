@@ -12,7 +12,7 @@ import java.util.List;
  * Transfer 事件流水写入/对账 Mapper
  * <p>
  * 写入走 INSERT IGNORE + 唯一键 (chain_id, transaction_hash, log_index)：重放安全（幂等）靠数据库约束，
- * 补拉崩溃后重拉同一页不会产生重复行；调用方按 500 行一批切分，避免单语句超出 max_allowed_packet
+ * 补拉崩溃后重拉同一页不会产生重复行；调用方按 {@code DbConsts.INSERT_BATCH_SIZE} 切分批大小，避免单语句超出 max_allowed_packet
  */
 public interface TransferEventLogMapper extends BaseMapper<TransferEventLog> {
 
