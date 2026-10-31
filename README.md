@@ -1,8 +1,9 @@
 # web3-backend
 
 > 基于 **Web3j 6 + Infura** 的以太坊后端骨架，面向钱包 / 充值提币 / 链上数据查询场景。
-> 已提供 13 个链上查询/补拉/充值配置 REST 接口、区块扫描进度落库、ERC-20 Transfer 事件解码入库（断点续传 + 幂等）、WebSocket
-> （`eth_subscribe`）实时区块/转账监听，以及充值业务闭环（热钱包匹配 → 幂等入账 → Redis 通知下游）。
+> 已提供 13 个链上查询/补拉/充值配置 REST 接口、ERC-20 Transfer 事件解码入库（断点续传 + 幂等）、
+> WebSocket（`eth_subscribe`）实时转账订阅引擎（断线重连 + newHeads 心跳僵尸判定 + 批量落库路由）、
+> 定时自动核对（游标→链高自动追平）与手动区间补拉双入口，以及充值业务闭环（热钱包匹配 → 幂等入账 → Redis 通知下游）。
 
 - JDK 21 + Spring Boot 4.1.2 + Spring 7.0.10 + MySQL/Redis + MyBatis-Plus + Web3j 6.1.0 + Infura
 - 技术选型详解见 [`docs/技术选型.md`](docs/技术选型.md)
@@ -14,7 +15,7 @@
 ### 已实现
 - **链上查询 REST API**：客户端版本 / 链 ID / 最新区块高度 / Gas Price / 地址余额（wei + ether）/ 分页拉取合约日志 / 按交易哈希解码转账
 - **历史 Transfer 日志补拉（backfill）**：以 `block_sync_state.latest_scanned_block` 为游标**断点续传**，按页（默认 1000 块/页）拉取→解码→落库，
-  每页"事件写入 + 游标推进"同事务提交，唯一键 `INSERT IGNORE` 保证重放不产生重复流水（详见 [5.7](#57-历史补拉backfill与游标断点续传)）
+  每页"事件写入 + 游标推进"同事务提交，唯一键 `INSERT IGNORE` 保证重放不产生重复流水（详见 [5.6](#56-历史补拉backfill与游标断点续传)）
 - **Transfer 事件精确过滤与解码**：`eth_getLogs` 只带 `topic[0] = Transfer(address,address,uint256)`，非 Transfer 日志丢弃；
   金额按各合约 `decimals()` 动态换算（USDT 6 / ETH 18），`displayValue` 与 Etherscan 展示一致
 - **节点限制自适应**：单段命中 Infura `more than 10000 results` 时自动缩小跨度续拉（优先采纳节点建议区间，否则二分，16 块护栏）
@@ -22,15 +23,19 @@
   - `newHeads`：新区块头推送（高度、hash、gasUsed、时间）
   - `logs`：按合约 + `Transfer` topic 过滤的转账事件推送
   - 两者都走 `eth_subscribe`，回调在 WebSocket 读线程执行，`CompositeDisposable` 统一退订
-- **区块扫描器**：轮询最新区块高度并把进度落库到 `block_sync_state`，Redisson 分布式锁保证多实例仅一个节点执行
+- **Transfer 实时订阅引擎（模块三，`TransferStreamEngine`）**：自建可重连 wss 连接订阅目标合约 Transfer，回调只解码入队、
+  独立工作线程批量落库（幂等 `INSERT IGNORE`）并在事务提交后接充值路由；断线按指数退避重建整套连接重连；
+  `newHeads` 心跳辅助判定“连接活着但节点不推数据”的僵尸态（详见 [5.12](#512-transfer-实时订阅引擎与心跳僵尸判定模块三)）
+- **定时自动核对（`AutoBackfillScanner`）**：周期性把各关注合约从游标自动补拉到链上最新高度，兜底实时链路丢弃/漏看的事件，
+  与手动区间补拉同一口径（游标断点续传 + 幂等落库 + 事务提交后充值路由；详见 [5.13](#513-定时自动核对autobackfillscanner)）
 - **RPC 容错**：Resilience4j 两套实例——查询接口 `rpc`，分页拉日志 `rpc-segment`（按单段粒度重试 + 指数退避 + 限流 5 QPS）
-- **代理可配置**：HTTP RPC 经 OkHttp 代理；wss 经自建 HTTP CONNECT 隧道（详见 [5.5](#55-代理穿透http-rpc--wss)）
+- **代理可配置**：HTTP RPC 经 OkHttp 代理；wss 经自建 HTTP CONNECT 隧道（详见 [5.4](#54-代理穿透http-rpc--wss)）
 - **统一响应与异常处理**：`ApiResponse` 封装 + `GlobalExceptionHandler`（RPC 类异常统一转 `502`）
 - **API 文档**：SpringDoc OpenAPI 3.1（`/swagger-ui.html`、`/v3/api-docs`）
 - **可观测性**：Actuator + Micrometer Prometheus
 - **离线单元测试**：13 个 JUnit 5 + Mockito 用例（不依赖真实节点/DB/Redis，覆盖模块四充值路由、热钱包匹配与参数校验口径），`mvn test` 全绿
 - **充值业务路由与落库（模块四）**：实时/补拉解出的 Transfer 事件按 `to` 地址比对平台热钱包与用户充值地址（配置中心 + `deposit_wallet` 表），
-  命中则以 `(chain_id, txHash, logIndex)` 唯一键幂等写入 `deposit_record`（状态**待确认**），随后 `PUBLISH deposit_channel {json}` 通知下游账务（详见 [5.11](#511-充值业务路由与落库模块四)）
+  命中则以 `(chain_id, txHash, logIndex)` 唯一键幂等写入 `deposit_record`（状态**待确认**），随后 `PUBLISH deposit_channel {json}` 通知下游账务（详见 [5.10](#510-充值业务路由与落库模块四)）
 
 ### 规划中
 - 提币服务、多链扩展、托管钱包；充值确认推进（`PENDING_CONFIRM → CREDITED`）与 `notify_status=FAILED` 的定时重发补偿
@@ -47,12 +52,12 @@
 | JSON | Jackson 3（`tools.jackson`）+ Jackson 2 双栈 | 3.1.7 / 2.21.7 | Boot 4 默认 Jackson 3；web3j 6 亦基于 Jackson 3，二者共享 `jackson-annotations` 2.21 |
 | 链节点接入 | Infura | — | 托管 RPC 节点（HTTP + WebSocket） |
 | 构建工具 | Maven | 3.9.x | 依赖管理与打包 |
-| ORM | MyBatis-Plus | 3.5.18（`spring-boot4-starter`） | 扫描进度等持久化 |
+| ORM | MyBatis-Plus | 3.5.18（`spring-boot4-starter`） | 游标/流水/充值记录持久化 |
 | 数据库 | MySQL | 8.x | `block_sync_state`、流水表 |
 | 缓存 | Redis | 7.x | 热点缓存、分布式协调 |
-| 分布式锁 | Redisson | 4.8.0 | 区块扫描互斥、提币防重 |
+| 分布式锁 | Redisson | 4.8.0 | 自动核对互斥、提币防重 |
 | RPC 容错 | Resilience4j | 2.4.0（`resilience4j-spring-boot4`） | 重试 + 熔断，需配合 `spring-boot-starter-aspectj` |
-| 任务调度 | Spring Scheduler + XXL-Job | 3.5.0（可选） | 扫块触发 |
+| 任务调度 | Spring Scheduler + XXL-Job | 3.5.0（可选） | 定时核对触发 |
 | API 文档 | SpringDoc OpenAPI | 3.2.0 | Swagger UI |
 | 监控 | Actuator + Micrometer + Prometheus | Boot BOM | 指标暴露 |
 | 编码简化 | Lombok | Boot BOM | `@Data`/`@Slf4j`/`@RequiredArgsConstructor` |
@@ -76,9 +81,9 @@
 │              SyncCursorService / TransferEventStoreService  │
 │              DepositWalletService + DepositRoutingService（模块四）│
 ├───────────┬──────────────────┬───────────────────────────┤
-│ web3j     │ wsWeb3j          │ Scanner（Scheduler/XXL-Job  │
+│ web3j     │ wsWeb3j          │ 定时核对（Scheduler/XXL-Job │
 │ (HTTP RPC │ (WebSocket 长连接 │  + Redisson 锁)            │
-│  OkHttp)  │  newHeads/logs)  │  区块轮询 → 进度落库         │
+│  OkHttp)  │  newHeads/logs)  │  游标 → 链高 自动补拉        │
 ├───────────┴──────────────────┴───────────────────────────┤
 │  持久层  MyBatis-Plus → MySQL（block_sync_state /          │
 │         transfer_event_log，游标与事件同事务；             │
@@ -99,15 +104,17 @@ web3-backend
 ├── pom.xml
 ├── sql/schema.sql                            # MySQL 初始化脚本（四张表）
 ├── docs/技术选型.md                            # 技术选型详解
+├── docs/实时充值业务流程.md                     # 纯业务视角的充值流程说明（不含技术实现）
 └── src/main/java/com/ray/web3
     ├── Web3BackendApplication.java           # 启动类（@EnableScheduling + @MapperScan）
     ├── config/
     │   ├── InfuraProperties.java             # web3.infura.* 配置绑定（含代理项、log-chunk-size）
-    │   ├── BackfillProperties.java           # web3.backfill.*（开关/单页跨度/单次上限/游标缓存）
-    │   ├── WebSocketProperties.java          # web3.websocket.* 配置绑定（url/代理/订阅开关/合约列表）
+    │   ├── BackfillProperties.java           # web3.backfill.*（开关/单页跨度/单次上限/游标缓存/自动核对）
+    │   ├── WebSocketProperties.java          # web3.websocket.* 配置绑定（url/代理/订阅开关/合约列表/重连/心跳）
     │   ├── DepositProperties.java            # web3.deposit.*（开关/频道/配置侧热钱包/缓存 TTL/确认阈值）
     │   ├── Web3jConfig.java                  # HTTP Web3j Bean（OkHttp 可选代理）
     │   ├── WebSocketConfig.java              # WebSocketService + wsWeb3j Bean（CONNECT 隧道注入）
+    │   ├── WebSocketServiceFactory.java      # service/web3j 工厂（代理隧道收敛点，供断线重连整套重建）
     │   ├── RedisConfig.java                  # RedisTemplate 序列化（Jackson 3）
     │   ├── DepositConfig.java                # 注册 DepositProperties
     │   └── XxlJobConfig.java                 # XXL-Job 执行器（xxl.job.enabled=true 才加载）
@@ -115,7 +122,8 @@ web3-backend
     ├── consts/PatternConsts.java             # 地址/交易哈希校验正则（各 Service 共用）
     ├── consts/DbConsts.java                  # 批量入库行数常量（全项目单一口径）
     ├── controller/ChainController.java       # 链上查询 + 历史补拉 + 充值地址配置 REST API（13 个端点）
-    ├── listener/ChainEventListener.java      # WS 实时订阅（newHeads + logs）
+    ├── listener/ChainEventListener.java      # WS 实时订阅（newHeads + logs，观测用）
+    ├── listener/TransferStreamEngine.java    # 模块三：实时订阅引擎（解码入队 + 批量落库路由 + 断线重连 + newHeads 心跳）
     ├── service/
     │   ├── ChainService.java                 # 链上查询接口
     │   ├── EventLogService.java              # eth_getLogs 分页拉取 + 单页拉取接口
@@ -136,14 +144,14 @@ web3-backend
     │       ├── DepositWalletServiceImpl.java     # 配置+DB 并集的小写地址索引
     │       ├── DepositRoutingServiceImpl.java    # 待确认入账 + deposit_channel 发布
     │       └── HistoryBackfillServiceImpl.java # 逐页推进 + Redisson 互斥
-    ├── scanner/BlockScanner.java             # 区块扫描器（双触发 + 分布式锁）
+    ├── scanner/AutoBackfillScanner.java      # 定时自动核对（游标→链高补拉，双触发 + 全局锁）
     ├── mapper/
     │   ├── BlockSyncStateMapper.java         # 游标 upsert（GREATEST 单调前移）/ 回读
     │   ├── TransferEventLogMapper.java       # INSERT IGNORE 批量写 + 对账计数
     │   ├── DepositWalletMapper.java          # 启用充值地址全量加载（供缓存）
     │   └── DepositRecordMapper.java          # 充值记录 INSERT IGNORE + 幂等回读 + 通知状态更新
     ├── model/
-    │   ├── entity/BlockSyncState.java        # 扫描进度/补拉游标实体
+    │   ├── entity/BlockSyncState.java        # 补拉游标实体（唯一键 chain+contract）
     │   ├── entity/TransferEventLog.java      # Transfer 流水实体
     │   ├── entity/DepositWallet.java         # 充值地址配置实体
     │   ├── entity/DepositRecord.java         # 充值记录实体（状态待确认）
@@ -272,13 +280,7 @@ redis-cli SUBSCRIBE deposit_channel
 - 熔断策略：滑动窗口 20、最小调用数 5、失败率 ≥ 50% 熔断 30s、半开放行 5 次。
 - 兜底由 `GlobalExceptionHandler` 完成：`IllegalStateException`（RPC/节点错误）→ `502`，`TransactionException` → `500`，参数非法 → `400`。
 
-### 5.3 区块扫描（Scheduler + XXL-Job + Redisson）
-- `BlockScanner.doScan` 取最新区块高度 → `selectOne` 查进度 → 无记录 `insert`、有记录 `updateById`，写入 `block_sync_state`。
-- **触发通道现状**：`@Scheduled(fixedDelayString = "${web3.scanner.interval-ms:30000}")` 目前**处于注释状态**，`scanByXxlJob`（`@XxlJob("blockScanHandler")`）是唯一入口；
-  而 `xxl.job.enabled` 默认 `false`，因此本地默认配置下扫描器不会自动跑，需要打开 `@Scheduled` 或接入 XXL-Job 调度中心。
-- **Redisson `tryLock`** 保证多实例仅一个节点执行，未抢到锁直接跳过本轮；释放前判 `isHeldByCurrentThread()`。
-
-### 5.4 WebSocket 实时订阅（ChainEventListener）
+### 5.3 WebSocket 实时订阅（ChainEventListener）
 - `web3.websocket.enabled=true` 时加载；`ApplicationReadyEvent` 后启动订阅，`subscribe-new-heads` 控制是否订 `newHeads`。
 - 用的是 **`newHeadsNotifications()` / `logsNotifications(addresses, topics)`**，即 `eth_subscribe` 服务端推送；
   **不要**混用 `ethLogFlowable(filter)`——后者是 `eth_newFilter` + 每 15s 轮询 `eth_getFilterChanges`，与 WebSocket 无关。
@@ -287,7 +289,7 @@ redis-cli SUBSCRIBE deposit_channel
 - 资源释放顺序：`@PreDestroy` 先 `disposables.dispose()`（发 `eth_unsubscribe`）→ `webSocketService.close()`；`wsWeb3j.shutdown()` 由 Bean `destroyMethod` 在这之后执行。
 - 局限：`eth_subscribe("logs")` 只按 address + topics 过滤，无区块区间概念，也不回报链重组，故监听只做"提前发现"，落库仍以区间重扫为准。
 
-### 5.5 代理穿透（HTTP RPC + wss）
+### 5.4 代理穿透（HTTP RPC + wss）
 Java 客户端默认不读系统代理，本机开 Clash/v2ray 时会出现"curl 能连、Java 超时"。两条通道分别处理：
 
 **HTTP RPC**（`Web3jConfig`）：OkHttp 显式设 `Proxy(HTTP)`。
@@ -317,7 +319,7 @@ web3:
 - `ws://`（本地 Anvil 等）或未配代理 → 直连，`wss` 未配代理时打 WARN 提醒。
 - 生产海外服务器通常两项都留空直连；建议用环境变量注入，避免把 `127.0.0.1:7890` 写死。
 
-### 5.6 eth_getLogs 分页与节点上限自适应（EventLogServiceImpl）
+### 5.5 eth_getLogs 分页与节点上限自适应（EventLogServiceImpl）
 - 校验合约地址格式与区块区间 → 用 `ethBlockNumber` 截断超出链上高度的 `toBlock` → 按 `web3.infura.log-chunk-size` 分段循环调用 `eth_getLogs`。
 - **topic 精确过滤**：`buildFilter` 用 `addSingleTopic(TransferEventDecoder.transferEventTopic())`，只拉 `Transfer` 日志；
   topic[0] 由 `EventEncoder.encode(EventConsts.TRANSFER_EVENT)` 算出，与 `ChainEventListener` 共用同一个方法（单一来源，避免监听与补拉过滤条件漂移）。
@@ -332,7 +334,7 @@ web3:
 - 验收数据（主网 USDT 18000000→18001000）：整段 1000 块一次请求命中上限（实际 16027 条 > 10000），
   自适应按节点建议切成 587 + 413 两段续拉，一次补拉全部取回，`savedCount` 与 `transferCount` 一致。
 
-### 5.7 历史补拉（backfill）与游标断点续传
+### 5.6 历史补拉（backfill）与游标断点续传
 监听器启动前要把停机期间的状态补齐，靠 `HistoryBackfillService` 完成：以游标（`lastProcessedBlock`）为起点按页拉取，不做一次性全量重扫。
 
 **逐页固定顺序**：`fetchTransferLogPage`（拉取+解码）→ `savePageWithCursor`（事件落库 + 游标推进，同事务）→ `refreshCache`（刷 Redis）。
@@ -362,7 +364,7 @@ web3:
 | 与独立 RPC 对账 | `eth_getLogs` 直查 18001001..18001050 与 18000000 单块分别得 783 / 45 条，与库内一致 |
 | 重复请求已覆盖区间 | `skipped=true`，`pages=0`，游标不变 |
 
-### 5.8 Redis 与序列化
+### 5.7 Redis 与序列化
 - `RedisConfig` 为 `RedisTemplate<String, Object>` 配置 key=String、value=JSON。
   Boot 4（Spring Data Redis 4）下基于 Jackson 2 的 `GenericJackson2JsonRedisSerializer` 已 `@Deprecated(forRemoval = true)`，现改用 Jackson 3 的 **`GenericJacksonJsonRedisSerializer`**。
 - mapper 用 `JsonMapper.builder()` 构建（Jackson 3 的 `ObjectMapper` 不可变）；`WRITE_DATES_AS_TIMESTAMPS` 已从 `SerializationFeature` 移到 `DateTimeFeature`，且 java.time 支持内置于 databind，**不再需要注册 `JavaTimeModule`**。
@@ -370,9 +372,9 @@ web3:
 - `RedisTemplate<String, Object>` 这个 Bean 目前仍未被业务代码调用（缓存对象类需求再用）；游标缓存走 Boot 自动配置的 **`StringRedisTemplate`**（游标是纯数字，不需要 JSON 序列化）。
 - Redisson 独立使用自己的编解码。
 
-### 5.9 数据模型
+### 5.8 数据模型
 
-`BlockSyncState`（表 `block_sync_state`）记录扫描进度，`contract_address` 非空时 `latest_scanned_block` 同时是该合约的**补拉游标**：
+`BlockSyncState`（表 `block_sync_state`）按 `(chain_id, contract_address)` 记录各合约的**补拉游标**（`latest_scanned_block` 即 `lastProcessedBlock`，下一轮从 +1 续拉）：
 
 | 列 | 说明 |
 |---|---|
@@ -420,11 +422,11 @@ web3:
 | `notify_status` / `notify_at` | 下游发布状态 `INIT`/`SENT`/`FAILED`，`FAILED` 可据此补偿重发 |
 | `event_source` | `STREAM`=WebSocket 实时订阅，`BACKFILL`=历史补拉 |
 
-### 5.10 安全与密钥
+### 5.9 安全与密钥
 - 私钥严禁硬编码：本地用环境变量/`.env`（勿提交），生产建议 Vault 或托管钱包（Fireblocks/Turnkey）。
 - keystore 文件已在 `.gitignore` 排除（`wallet/`、`*.keystore`）。
 
-### 5.11 充值业务路由与落库（模块四）
+### 5.10 充值业务路由与落库（模块四）
 把“链上解析出的 Transfer 事件”变成“平台充值记录”，`DepositRoutingService.route(events, source)` 三步一体；
 实时链路（`TransferStreamEngine` 工作线程）与补拉链路（`HistoryBackfillServiceImpl` 逐页）均在**落库事务提交后**调用它。
 
@@ -453,7 +455,7 @@ web3:
 - 路由异常在两条链路上都单独兜住（只记 ERROR）：账务侧故障不能中断实时订阅入队，也不能打断整段补拉留下游标空洞；
   缺失部分由补拉重跑区间自然补齐（幂等）。
 
-### 5.12 重复口径收拢（`PatternConsts` / `ChainParams` / `ChainQueryUtils`）
+### 5.11 重复口径收拢（`PatternConsts` / `ChainParams` / `ChainQueryUtils`）
 地址正则、区块区间校验、取最新块高原先在 3~4 个 Service 里各写一份，现已集中；新增接口直接复用，不再复制粘贴：
 
 | 位置 | 提供 | 说明 |
@@ -468,6 +470,37 @@ web3:
 
 未收拢：`EventLogServiceImpl` 里的 `RESULT_LIMIT_ERROR_PATTERN` / `RANGE_LIMIT_ERROR_PATTERN`（解析节点报错文案里的建议区间）
 只服务“自适应缩跨度”一处，搬到公共类会把节点报错格式这个实现细节外泄，所以留在本地。
+
+### 5.12 Transfer 实时订阅引擎与心跳僵尸判定（模块三）
+`TransferStreamEngine`（`web3.websocket.enabled=true` 时加载）是业务化的实时链路，与观测用的 `ChainEventListener` 互不依赖：
+
+**主链路**：自建 wss 连接（`WebSocketServiceFactory`）→ `ethLogFlowable(EthFilter)` 订阅目标合约 Transfer →
+回调内只做 `isRemoved()` 校验 + 解码 + 入队（有界队列，满则丢弃告警）→ 独立工作线程攒批落库（复用模块二幂等写入）→
+事务提交后接充值路由（`source=STREAM`）。耗时 DB 写绝不碰 web3j 轮询线程；丢弃的缺口由自动核对兜底。
+
+**断线重连**：`ethLogFlowable` 内部吞轮询异常，断线信号取自 `WebSocketService` 的 onClose/onError 回调；
+隧道 socket 关闭后无法复用，故每次重连都经工厂**重建**整套 service/web3j 并重新订阅；
+所有连接/重连/心跳检查串行跑在同一单线程调度器上，`reconnectScheduled` CAS 去重，指数退避（initial ×2ⁿ，封顶 max）。
+
+**newHeads 心跳辅助判定**：onClose/onError 只能探测“socket 已断”，看不到“连接活着但节点不推数据”的僵尸态：
+- 引擎在**自身** WS 连接上另订阅 `newHeadsNotifications()`（挂共享 `wsWeb3j` 探测不到本引擎的连接），每次推送记录链高与时间戳；
+- 看门狗（同一调度器周期任务）发现超过 `heartbeat-timeout-ms` 无推送时，用 **HTTP 主通道复核链上高度**：
+  链在前进而 WS 没推到 → 判僵尸，走既有重连流程重建；高度没变 → 链本身空闲（如 Anvil 按需出块），只重置计时不误伤；
+  复核 RPC 也异常 → 整条链路不通，同样触发重连；
+- 重连成功后重置心跳基准并重新挂上订阅；心跳只是辅助信号，订阅失败不影响 Transfer 主链路。
+
+### 5.13 定时自动核对（AutoBackfillScanner）
+实时链路定位“尽早发现”，“一笔不漏”由本扫描器保证：周期性把每个关注合约从**游标 +1** 补拉到链上最新高度，
+直接复用 `HistoryBackfillService.backfill`，因此与手动区间核对共享全部保障（分页拉取、幂等落库、游标同事务推进、
+事务提交后充值路由 `source=BACKFILL`）。
+
+- **合约清单**：`web3.backfill.auto-contracts` 优先，留空回退 `web3.websocket.watch-contracts`（实时盯的合约与核对的合约口径一致）；
+- **双触发通道**：`@Scheduled(auto-interval-ms)` + `@XxlJob("autoBackfillHandler")`；
+- **全局互斥**：Redisson `tryLock`（`web3:backfill:lock:auto`）多实例仅一节点执行，抢不到让位下一轮；
+  单合约异常只记日志不中断其余合约，失败下一轮自动重试（游标未推进即自然续拉）；
+- **首次起点保护**：无游标的合约从 `auto-from-block` 起步，默认 `-1`=跳过并告警——主网代币从创世块扫到当前高度是十万级分页，
+  绝不应由定时任务擅自发起；先手动补拉建立游标（或显式配置起点）后定时任务自动接管；
+- **已追平不空转**：游标 +1 超过链高直接返回；`web3.backfill.enabled=false` 时补拉 Bean 不存在，本扫描器空转不报错。
 
 ---
 
@@ -486,7 +519,7 @@ web3:
 ```bash
 mysql -u root -p < sql/schema.sql
 ```
-脚本会建 `web3_backend` 库与四张表：`block_sync_state`（扫描进度/补拉游标）、`transfer_event_log`（Transfer 流水）、
+脚本会建 `web3_backend` 库与四张表：`block_sync_state`（补拉游标）、`transfer_event_log`（Transfer 流水）、
 `deposit_wallet`（平台热钱包/用户充值地址）、`deposit_record`（充值入账记录）。
 已跑过旧版本脚本的库，补执行 `transfer_event_log`（或模块四新增的两张充值表）建表语句即可。
 
@@ -529,6 +562,10 @@ java -jar target/web3-backend-1.0.0-SNAPSHOT.jar
 启动成功的标志：日志出现 `Tomcat started on port 8080`、（启用 WS 时）`WebSocket 连接成功` 与
 `已订阅 newHeads` / `已订阅 Transfer 日志（eth_subscribe logs）`，之后持续输出 `[newHeads]`、`[logs]` 推送。
 
+实时链路与自动核对跑通的标志：`Transfer 实时订阅引擎已启动 … heartbeat=90000ms` → `WebSocket 已连接并订阅 Transfer 事件` →
+转账发生时 `[stream] 事件入队` / `批量落库` / `[deposit] 充值路由`；每轮核对输出 `[auto-backfill] contract=…`（已追平时无此日志，
+僵尸判定/空闲链识别见 `[heartbeat]` 日志）。
+
 补拉跑通的标志（以主网 USDT 18000000→18001000 为例）：
 `WARN … 分段 [18000000,18000999] 命中节点上限，跨度 1000 → 587 后续拉` → `INFO 补拉分页 …` → `INFO 历史补拉完成 … pages=2`，
 且 `SELECT latest_scanned_block FROM block_sync_state WHERE chain_id=1 AND contract_address='0xdac1…'` 与
@@ -554,14 +591,19 @@ java -jar target/web3-backend-1.0.0-SNAPSHOT.jar
 | `web3.backfill.chunk-size` | `WEB3_BACKFILL_CHUNK_SIZE` | 1000 | 补拉单页区块跨度；命中节点上限时由 `EventLogService` 自动缩跨度，无需手工调小 |
 | `web3.backfill.max-blocks-per-run` | `WEB3_BACKFILL_MAX_BLOCKS` | 0（没有单次上限） | 单次请求最多推进区块数，设正数可把大区间拆成多次调用（下次从游标自动续拉，响应 `limited=true`） |
 | `web3.backfill.cursor-cache-enabled` | `WEB3_BACKFILL_CURSOR_CACHE` | true | 游标读是否优先走 Redis（关闭后直读 MySQL；Redis 不可用时也自动降级） |
-| `web3.scanner.enabled` | — | true | 是否加载区块扫描器 Bean |
-| `web3.scanner.interval-ms` | — | 30000 | 扫描间隔（`@Scheduled` 当前被注释，改动生效需打开注解） |
+| `web3.backfill.auto-enabled` | `WEB3_BACKFILL_AUTO_ENABLED` | true | 是否启用定时自动核对（`AutoBackfillScanner`，见 [5.13](#513-定时自动核对autobackfillscanner)） |
+| `web3.backfill.auto-interval-ms` | `WEB3_BACKFILL_AUTO_INTERVAL_MS` | 30000 | 自动核对轮询间隔 |
+| `web3.backfill.auto-contracts` | `WEB3_BACKFILL_AUTO_CONTRACTS` | 空 | 自动核对的合约清单；留空回退 `web3.websocket.watch-contracts` |
+| `web3.backfill.auto-from-block` | `WEB3_BACKFILL_AUTO_FROM_BLOCK` | -1 | 无游标合约的首次起步区块；-1=跳过（先手动补拉建立游标，防定时任务误发全链历史扫描） |
 | `web3.websocket.enabled` | `WEB3_WS_ENABLED` | true | 是否建立 WS 连接与订阅 |
 | `web3.websocket.url` | — | `wss://mainnet.infura.io/ws/v3/{projectId}` | WS 端点（本地节点用 `ws://127.0.0.1:8545`） |
 | `web3.websocket.proxy-host` | `WEB3_PROXY_HOST` | `127.0.0.1` | wss 的 CONNECT 隧道代理主机，留空直连 |
 | `web3.websocket.proxy-port` | `WEB3_PROXY_PORT` | `7890` | wss 的 CONNECT 隧道代理端口 |
-| `web3.websocket.subscribe-new-heads` | — | true | 是否订阅 `newHeads` |
+| `web3.websocket.subscribe-new-heads` | — | true（当前 yml 设为 false） | `ChainEventListener` 是否订阅 `newHeads`（引擎心跳不受此项控制，见 heartbeat-enabled） |
 | `web3.websocket.watch-contracts` | `WEB3_WATCH_CONTRACTS` | USDT 合约 | 监听 Transfer 的合约列表，逗号分隔；留空=全部合约 |
+| `web3.websocket.heartbeat-enabled` | `WEB3_WS_HEARTBEAT_ENABLED` | true | 是否在引擎自身 WS 连接上启用 newHeads 心跳僵尸判定（见 [5.12](#512-transfer-实时订阅引擎与心跳僵尸判定模块三)） |
+| `web3.websocket.heartbeat-timeout-ms` | `WEB3_WS_HEARTBEAT_TIMEOUT_MS` | 90000 | 无 newHeads 推送多久后进入僵尸判定（需大于链的正常出块间隔） |
+| `web3.websocket.heartbeat-check-interval-ms` | `WEB3_WS_HEARTBEAT_CHECK_MS` | 15000 | 心跳看门狗轮询周期 |
 | `web3.deposit.enabled` | `WEB3_DEPOSIT_ENABLED` | true | 是否启用充值路由与落库（关闭后只写流水表，不产生充值记录） |
 | `web3.deposit.deposit-channel` | `WEB3_DEPOSIT_CHANNEL` | `deposit_channel` | 下游账务通知的 Redis 频道 |
 | `web3.deposit.hot-wallets` | — | 空（示例注释一个地址） | 配置中心热钱包：key=地址，value=币种符号（留空=不限合约）；与 `deposit_wallet` 表取并集，同地址以 DB 为准 |
@@ -626,7 +668,7 @@ A：本期只负责“发现即入账”，确认推进（`CREDITED`）属于确
 链重组则置 `INVALID`（需额外的回退机制，见“规划中”）。
 
 **Q：为什么有的接口接受 `0X...` 地址、有的却报参数非法？**
-A：设两口径（见 [5.12](#512-重复口径收拢patternconsts--chainparams--chainqueryutils)）。日志/补拉类接口的合约地址会原样拼进 `eth_getLogs` 发给节点，
+A：设两口径（见 [5.11](#511-重复口径收拢patternconsts--chainparams--chainqueryutils)）。日志/补拉类接口的合约地址会原样拼进 `eth_getLogs` 发给节点，
 所以只收严格 `^0x`；充值地址配置（`POST /api/chain/deposit/wallets` 与 `web3.deposit.hot-wallets`）会先归一小写再入库/匹配，
 因此 `0X` 前缀也接受。大写十六进制字母（EIP-55 校验和地址）两边都能识别。
 
@@ -639,5 +681,11 @@ A：本地 Redis 无密码时，`application.yml` 不要写 `password` 行（即
 **Q：`chain-id` 和扫描的链不一致？**
 A：`web3.infura.chain-id` 必须与 `http-url`、`web3.websocket.url` 指向同一网络（主网 `1`，Sepolia `11155111`）。
 
-**Q：区块扫描一直没跑？**
-A：`BlockScanner` 的 `@Scheduled` 当前是注释状态，而 `xxl.job.enabled` 默认 `false`，两条触发通道都没开。本地调试请临时打开 `@Scheduled`，或部署 XXL-Job 调度中心并置 `XXL_JOB_ENABLED=true`。
+**Q：实时订阅看着连着，但好久没有新事件进来？**
+A：可能是“连接活着但节点不推数据”的僵尸态。引擎的 newHeads 心跳会自动处理：超时未出块时先用 HTTP 通道复核链高，
+链确实在前进才判僵尸重建重连；链本身空闲（如本地 Anvil 按需出块）只重置计时不重连。排查时看日志
+`[heartbeat]`前缀；需关闭该机制置 `WEB3_WS_HEARTBEAT_ENABLED=false`。
+
+**Q：定时自动核对对新合约一声不吹地跳过了？**
+A：设计如此。无游标的合约默认不自动从创世块开扫（`auto-from-block=-1`），日志会告警提示先手动补拉建立游标；
+想直接接管就把 `WEB3_BACKFILL_AUTO_FROM_BLOCK` 设为该代币部署块号（或 0）。

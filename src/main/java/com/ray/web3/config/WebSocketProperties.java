@@ -56,4 +56,15 @@ public class WebSocketProperties {
 
     /** 工作线程单次批量落库的最大条数：攒批降低 DB 写频率，同时限制单批大小 */
     private int workerBatchSize = 200;
+
+    // ============ newHeads 心跳：断线判定的辅助信号（探测“连接活着但不推数据”的僵尸态）============
+
+    /** 是否启用 newHeads 心跳监测：在引擎自身 WS 连接上订阅 newHeads，超时未收到出块则复核后触发重连 */
+    private boolean heartbeatEnabled = true;
+
+    /** 心跳超时阈值（毫秒）：连续无 newHeads 推送超过该时长即进入僵尸判定；需大于链的正常出块间隔 */
+    private long heartbeatTimeoutMs = 90_000L;
+
+    /** 心跳检查周期（毫秒）：看门狗轮询间隔，与超时阈值同量级即可 */
+    private long heartbeatCheckIntervalMs = 15_000L;
 }

@@ -7,6 +7,7 @@ import com.ray.web3.model.dto.TransferEventDTO;
 import com.ray.web3.service.DepositRoutingService;
 import com.ray.web3.service.TokenMetadataService;
 import com.ray.web3.service.TransferEventStoreService;
+import com.ray.web3.util.ChainQueryUtils;
 import com.ray.web3.util.TransferEventDecoder;
 import io.reactivex.disposables.Disposable;
 import jakarta.annotation.PreDestroy;
@@ -24,6 +25,8 @@ import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.Log;
 import org.web3j.protocol.websocket.WebSocketService;
 import org.web3j.protocol.websocket.events.LogNotification;
+import org.web3j.protocol.websocket.events.NewHeadsNotification;
+import org.web3j.utils.Numeric;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -49,6 +52,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 2. 断线重连：{@code ethLogFlowable} 内部吞掉轮询异常、不会向下游 onError，因此重连触发点取自
  *    {@code WebSocketService} 的 onClose/onError 回调；且走 HTTP 代理隧道时 reconnectBlocking 无法复用
  *    已关闭的 socket，故每次重连都经工厂<b>重建</b>整套 service/web3j 并重新订阅，指数退避直到成功。
+ * 3. newHeads 心跳辅助判定：onClose/onError 只能探测“ socket 已断”，看不到“连接活着但节点不再推数据”
+ *    的僵尸态；引擎在自身 WS 连接上另订阅 newHeads 作为链的心跳，看门狗发现超时未出块时，
+ *    先用 HTTP 通道复核链上高度——链在前进而 WS 没推到才算僵尸，触发重建重连；
+ *    链本身空闲（如 Anvil 按需出块）则只重置计时不误伤。
  */
 @Slf4j
 @Component
@@ -67,13 +74,21 @@ public class TransferStreamEngine {
     /** 充值路由（模块四）受 web3.deposit.enabled 控制，用 ObjectProvider 延迟取得，关闭时不影响启动 */
     private final ObjectProvider<DepositRoutingService> depositRoutingService;
 
+    /** HTTP 主通道（Bean 名 web3j，与引擎内部按名新建的 WS 实例区分）：心跳僵尸判定时复核链上高度用 */
+    private final Web3j web3j;
+
     /** 解码后的事件缓冲队列（有界，满则丢弃告警，保护轮询线程） */
     private BlockingQueue<TransferEventDTO> eventQueue;
 
     /** 当前连接三件套：重连时整体重建 */
     private volatile WebSocketService webSocketService;
-    private volatile Web3j web3j;
+    private volatile Web3j wsClient;
     private volatile Disposable subscription;
+
+    /** newHeads 心跳：最近一次收到推送的区块/时间戳，及挂在引擎自身 WS 连接上的心跳订阅 */
+    private volatile long lastHeartbeatBlock = -1L;
+    private volatile long lastHeartbeatAt;
+    private volatile Disposable heartbeatSubscription;
 
     /** 重连调度器（单线程，串行化所有连接/订阅操作）+ 工作线程 + 生命周期锁 */
     private ScheduledExecutorService reconnectExecutor;
@@ -100,10 +115,16 @@ public class TransferStreamEngine {
 
         // 首连也走调度器，避免 connectBlocking 阻塞容器启动主线程
         reconnectExecutor.execute(this::connectAndSubscribe);
-        log.info("Transfer 实时订阅引擎已启动 url={} contracts={} pollingMs={}ms",
+        if (properties.isHeartbeatEnabled()) {
+            // 与连接/重连同一单线程串行：检查与重连动作天然互斥，无并发竞态
+            reconnectExecutor.scheduleWithFixedDelay(this::checkHeartbeat,
+                    properties.getHeartbeatCheckIntervalMs(), properties.getHeartbeatCheckIntervalMs(), TimeUnit.MILLISECONDS);
+        }
+        log.info("Transfer 实时订阅引擎已启动 url={} contracts={} pollingMs={}ms heartbeat={}",
                 properties.getUrl(),
                 properties.getWatchContracts(),
-                properties.getPollingIntervalMs());
+                properties.getPollingIntervalMs(),
+                properties.isHeartbeatEnabled() ? properties.getHeartbeatTimeoutMs() + "ms" : "off");
     }
 
     /**
@@ -126,10 +147,13 @@ public class TransferStreamEngine {
                 service.connect(log::info, err -> onConnectionDown("error: " + err.getMessage()),
                         () -> onConnectionDown("socket closed"));
                 this.webSocketService = service;
-                this.web3j = client;
+                this.wsClient = client;
 
                 subscribe(client);
+                subscribeHeartbeat(client);
 
+                // 刚建好的连接还没有 newHeads 推过来，从当前时刻重新起算，避免重连瞬间被旧超时误判
+                refreshHeartbeat();
                 reconnectAttempt = 0;
                 reconnectScheduled.set(false);
                 log.info("WebSocket 已连接并订阅 Transfer 事件");
@@ -160,6 +184,73 @@ public class TransferStreamEngine {
                     log.warn("Transfer 订阅 Flowable 异常: {}", err.getMessage());
                     onConnectionDown("flowable error");
                 });
+    }
+
+    /**
+     * newHeads 心跳订阅：挂在引擎<b>自身</b> WS 连接上（挂共享 wsWeb3j 探测不到本引擎连接的僵尸态）。
+     * 心跳只是辅助信号，订阅失败不影响主链路：退订/重建后下一轮重连会重新挂上
+     */
+    private void subscribeHeartbeat(Web3j client) {
+        if (!properties.isHeartbeatEnabled()) {
+            return;
+        }
+        try {
+            this.heartbeatSubscription = client.newHeadsNotifications()
+                    .subscribe(this::onHeartbeat,
+                            err -> log.warn("[heartbeat] newHeads 订阅异常（仅失去心跳信号，不影响 Transfer 订阅）: {}",
+                                    err.getMessage()));
+        } catch (Exception e) {
+            log.warn("[heartbeat] 订阅 newHeads 失败（不影响主链路）: {}", e.getMessage());
+        }
+    }
+
+    /** newHeads 推送到达：记录链位与时间戳，看门狗据此判定连接是否还活着 */
+    private void onHeartbeat(NewHeadsNotification notification) {
+        try {
+            this.lastHeartbeatBlock = Numeric.toBigInt(notification.getParams().getResult().getNumber()).longValue();
+        } catch (Exception e) {
+            // 高度解析失败不影响心跳本质（时间戳才是判定依据）
+            log.debug("[heartbeat] 解析区块高度失败: {}", e.getMessage());
+        }
+        this.lastHeartbeatAt = System.currentTimeMillis();
+    }
+
+    /**
+     * 心跳看门狗（与连接/重连同一串行调度线程，无需额外加锁）：
+     * 1. 已有断开重连在途/已判僵尸 → 不重复触发；连接尚未建立 → 本轮跳过；
+     * 2. 超时未收到 newHeads 时用 HTTP 主通道复核：链高度高于最后心跳块 = 链在前进而 WS 没推到，
+     *    判僵尸触发重建；高度没变 = 链本身空闲（Anvil 按需出块等），只重置计时不误伤；
+     * 3. 复核 RPC 也异常 = 整条链通道都不通，同样触发重连重建
+     */
+    private void checkHeartbeat() {
+        if (!properties.isHeartbeatEnabled() || !running.get()
+                || reconnectScheduled.get() || wsClient == null) {
+            return;
+        }
+        long last = lastHeartbeatAt;
+        if (last == 0L || System.currentTimeMillis() - last < properties.getHeartbeatTimeoutMs()) {
+            return;
+        }
+        long silentMs = System.currentTimeMillis() - last;
+        try {
+            long latest = ChainQueryUtils.latestBlockNumber(web3j).longValue();
+            if (latest > lastHeartbeatBlock) {
+                log.warn("[heartbeat] 已 {}ms 未收到 newHeads，但 HTTP 复核链已从 {} 前进到 {}，"
+                                + "判定 WS 僵尸连接，触发重建重连", silentMs, lastHeartbeatBlock, latest);
+                onConnectionDown("heartbeat stale");
+            } else {
+                log.debug("[heartbeat] 已 {}ms 未收到 newHeads，链高度仍为 {}（空闲链），重置计时", silentMs, latest);
+                refreshHeartbeat();
+            }
+        } catch (Exception e) {
+            log.warn("[heartbeat] 超时且 HTTP 复核也失败（{}），链路整体异常，触发重连", e.getMessage());
+            onConnectionDown("heartbeat timeout + rpc fail");
+        }
+    }
+
+    /** 把心跳基准重置为“现在”：重连成功后、以及确认链空闲后调用 */
+    private void refreshHeartbeat() {
+        this.lastHeartbeatAt = System.currentTimeMillis();
     }
 
     /**
@@ -305,6 +396,16 @@ public class TransferStreamEngine {
      * 释放当前连接三件套：先退订（dispose 可能因连接已死触发 uninstall 异常，吞掉），再关 web3j 与服务
      */
     private void closeCurrentQuietly() {
+        Disposable hb = this.heartbeatSubscription;
+        if (hb != null && !hb.isDisposed()) {
+            try {
+                hb.dispose();
+            } catch (Exception e) {
+                log.debug("退订 newHeads 心跳异常（连接可能已断开）: {}", e.getMessage());
+            }
+        }
+        this.heartbeatSubscription = null;
+
         Disposable sub = this.subscription;
         if (sub != null && !sub.isDisposed()) {
             try {
@@ -315,7 +416,7 @@ public class TransferStreamEngine {
         }
         this.subscription = null;
 
-        Web3j client = this.web3j;
+        Web3j client = this.wsClient;
         if (client != null) {
             try {
                 client.shutdown();
@@ -323,7 +424,7 @@ public class TransferStreamEngine {
                 log.debug("关闭 wsWeb3j 异常: {}", e.getMessage());
             }
         }
-        this.web3j = null;
+        this.wsClient = null;
 
         WebSocketService service = this.webSocketService;
         if (service != null) {

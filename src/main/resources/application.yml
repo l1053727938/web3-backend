@@ -58,6 +58,14 @@ web3:
     max-blocks-per-run: ${WEB3_BACKFILL_MAX_BLOCKS:0}
     # 游标读优先走 Redis（关闭后每次直读 MySQL，Redis 不可用时也自动降级）
     cursor-cache-enabled: ${WEB3_BACKFILL_CURSOR_CACHE:true}
+    # ===== 定时自动核对：周期性把各合约从游标补拉到链上最新高度，兜底实时链路的缺口 =====
+    auto-enabled: ${WEB3_BACKFILL_AUTO_ENABLED:true}
+    auto-interval-ms: ${WEB3_BACKFILL_AUTO_INTERVAL_MS:30000}
+    # 核对合约清单；留空回退 web3.websocket.watch-contracts（实时盯的合约与核对的合约口径一致）
+    auto-contracts: ${WEB3_BACKFILL_AUTO_CONTRACTS:0x5FbDB2315678afecb367f032d93F642f64180aa3}
+    # 无游标合约的首次起步区块；-1=跳过（默认），先手动补拉建立游标后定时任务才接管，
+    # 设 0/具体块号则定时任务会对新合约直接发起大区间历史扫描，主网慎用
+    auto-from-block: ${WEB3_BACKFILL_AUTO_FROM_BLOCK:-1}
   # ============ WebSocket 实时订阅（newHeads & logs）============
   # 默认关闭，需要时打开 enabled（本地 Anvil 或 Infura WS 端点）
   websocket:
@@ -71,7 +79,7 @@ web3:
     # wss 代理：底层 Java-WebSocket 不读系统代理/JVM 代理参数，必须在此显式配置（留空则直连）
 #    proxy-host: ${WEB3_PROXY_HOST:127.0.0.1}
 #    proxy-port: ${WEB3_PROXY_PORT:7890}
-    subscribe-new-heads: true
+    subscribe-new-heads: false
     # 监听 Transfer 日志的合约地址，多个用逗号分隔；留空则监听全链 Transfer（量大慎用）
     watch-contracts: ${WEB3_WATCH_CONTRACTS:0xdac17f958d2ee523a2206206994597c13d831ec7,0x5FbDB2315678afecb367f032d93F642f64180aa3}
 #    watch-contracts: ${WEB3_WATCH_CONTRACTS:}
@@ -85,6 +93,13 @@ web3:
     # 解码事件内存队列容量 / 工作线程单批落库条数（回调只入队，独立线程批量写库）
     event-queue-capacity: ${WEB3_WS_QUEUE_CAPACITY:4096}
     worker-batch-size: ${WEB3_WS_BATCH_SIZE:1000}
+    # ===== newHeads 心跳：断线判定的辅助信号（探测“连接活着但节点不推数据”的僵尸态）=====
+    # 在引擎自身 WS 连接上订阅 newHeads；超时未出块时先用 HTTP 复核链高：
+    # 链在前进而 WS 没推到才重连；链空闲（如 Anvil 按需出块）只重置计时不误伤
+    heartbeat-enabled: ${WEB3_WS_HEARTBEAT_ENABLED:true}
+    # 超时阈值需大于链的正常出块间隔（ETH 主网 ~12s，BNB ~3s，PoA 可能更短）
+    heartbeat-timeout-ms: ${WEB3_WS_HEARTBEAT_TIMEOUT_MS:90000}
+    heartbeat-check-interval-ms: ${WEB3_WS_HEARTBEAT_CHECK_MS:15000}
 
   # ============ 模块四：充值业务路由与落库（REQ-BIZ-04）============
   deposit:
@@ -95,7 +110,7 @@ web3:
     # 与数据库 deposit_wallet 表取并集；同地址以 DB 为准，方便在库里精细启停
     # ⚠ 主网热钱包充值密集，建议用 contract 限定币种（如 USDT 合约地址），避免全量 Transfer 都生成充值记录
     hot-wallets:
-      0x0fD04a68d3c3A692d6Fa30384D1A87Ef93554eE6: ""
+      "0x70997970c51812dc3a010c7d01b50e0d17dc79c8": ""
     # 充值地址缓存回源间隔(ms)：路由按内存索引匹配，到期才回源 DB，避免每个事件打一次 SELECT
     wallet-cache-refresh-ms: ${WEB3_DEPOSIT_WALLET_TTL_MS:30000}
     # 确认阈值(区块数)：写入下游消息供账务判断最终确定性，0=不设置

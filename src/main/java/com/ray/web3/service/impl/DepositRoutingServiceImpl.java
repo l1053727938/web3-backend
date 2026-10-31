@@ -176,6 +176,7 @@ public class DepositRoutingServiceImpl implements DepositRoutingService {
         try {
             DepositEventVO message = toMessage(record);
             String payload = objectMapper.writeValueAsString(message);
+            //todo 没有下游消费
             stringRedisTemplate.convertAndSend(channel, payload);
             markNotifyStatus(record.getId(), DepositConsts.Notify.SENT, LocalDateTime.now());
             log.info("[deposit] 已发布充值通知 channel={} depositNo={} {} amount={} status={}",
@@ -262,7 +263,7 @@ public class DepositRoutingServiceImpl implements DepositRoutingService {
         if (wallet.getContract() == null || wallet.getContract().isBlank()) {
             return true;
         }
-        return contract != null && wallet.getContract().equalsIgnoreCase(contract);
+        return wallet.getContract().equalsIgnoreCase(contract);
     }
 
     /**
