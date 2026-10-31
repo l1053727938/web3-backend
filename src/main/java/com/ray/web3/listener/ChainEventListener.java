@@ -58,7 +58,7 @@ public class ChainEventListener {
         this.properties = properties;
     }
 
-//    @EventListener(ApplicationReadyEvent.class)
+    @EventListener(ApplicationReadyEvent.class)
     public void startSubscriptions() {
         if (properties.isSubscribeNewHeads()) {
             subscribeNewHeads();

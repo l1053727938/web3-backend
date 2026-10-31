@@ -46,9 +46,6 @@ web3:
     chain-id: 1   # Sepolia 测试网；主网为 1，对应改 https://mainnet.infura.io
     # eth_getLogs 分页单段最大区块跨度，节点限制更严时可调小（如 500/1000）
     log-chunk-size: ${WEB3_LOG_CHUNK_SIZE:50}
-  scanner:
-    enabled: true
-    interval-ms: 30000
   # ============ 历史日志补拉（监听器启动时的状态补齐）============
   backfill:
     enabled: ${WEB3_BACKFILL_ENABLED:true}
