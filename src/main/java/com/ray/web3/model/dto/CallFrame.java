@@ -2,6 +2,7 @@ package com.ray.web3.model.dto;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.Data;
 
 import java.util.List;
 
@@ -15,6 +16,7 @@ import java.util.List;
  * <p>
  * 该结构不要求字段齐全（不同节点 gas/input/output 可能缺省），故忽略未知/缺失属性。
  */
+@Data
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class CallFrame {
 
@@ -51,83 +53,4 @@ public class CallFrame {
     @JsonProperty("calls")
     private List<CallFrame> calls;
 
-    public String getType() {
-        return type;
-    }
-
-    public void setType(String type) {
-        this.type = type;
-    }
-
-    public String getFrom() {
-        return from;
-    }
-
-    public void setFrom(String from) {
-        this.from = from;
-    }
-
-    public String getTo() {
-        return to;
-    }
-
-    public void setTo(String to) {
-        this.to = to;
-    }
-
-    public String getValue() {
-        return value;
-    }
-
-    public void setValue(String value) {
-        this.value = value;
-    }
-
-    public String getGas() {
-        return gas;
-    }
-
-    public void setGas(String gas) {
-        this.gas = gas;
-    }
-
-    public String getGasUsed() {
-        return gasUsed;
-    }
-
-    public void setGasUsed(String gasUsed) {
-        this.gasUsed = gasUsed;
-    }
-
-    public String getInput() {
-        return input;
-    }
-
-    public void setInput(String input) {
-        this.input = input;
-    }
-
-    public String getOutput() {
-        return output;
-    }
-
-    public void setOutput(String output) {
-        this.output = output;
-    }
-
-    public String getError() {
-        return error;
-    }
-
-    public void setError(String error) {
-        this.error = error;
-    }
-
-    public List<CallFrame> getCalls() {
-        return calls;
-    }
-
-    public void setCalls(List<CallFrame> calls) {
-        this.calls = calls;
-    }
 }
