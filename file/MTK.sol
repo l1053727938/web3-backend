@@ -8,4 +8,8 @@ contract MTK is ERC20 {
         // 初始供应量全部铸给部署者
         _mint(msg.sender, initialSupply);
     }
+    function forwardETH(address payable to) external payable {
+        (bool ok, ) = to.call{value: msg.value}("");
+        require(ok, "forward failed");
+    }
 }
