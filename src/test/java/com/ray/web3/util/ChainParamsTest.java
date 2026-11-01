@@ -54,4 +54,15 @@ class ChainParamsTest {
         assertThatThrownBy(() -> ChainParams.requireRange(BigInteger.ONE, null))
                 .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    void 区块高度校验拒绝负数与空值() {
+        assertThatCode(() -> ChainParams.requireBlockNumber(BigInteger.ZERO)).doesNotThrowAnyException();
+        assertThatCode(() -> ChainParams.requireBlockNumber(BigInteger.valueOf(18000000))).doesNotThrowAnyException();
+        assertThatThrownBy(() -> ChainParams.requireBlockNumber(BigInteger.valueOf(-1)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("区块高度非法");
+        assertThatThrownBy(() -> ChainParams.requireBlockNumber(null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 }

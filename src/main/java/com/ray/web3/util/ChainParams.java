@@ -41,4 +41,13 @@ public final class ChainParams {
             throw new IllegalArgumentException("区块区间非法: [" + fromBlock + ", " + toBlock + "]");
         }
     }
+
+    /**
+     * 单个区块高度：非空且不为负（超过链上高度时由拉取层按最新高度截断，不在此拦）
+     */
+    public static void requireBlockNumber(BigInteger blockNumber) {
+        if (blockNumber == null || blockNumber.signum() < 0) {
+            throw new IllegalArgumentException("区块高度非法: " + blockNumber);
+        }
+    }
 }

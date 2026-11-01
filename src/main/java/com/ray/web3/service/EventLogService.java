@@ -22,6 +22,19 @@ public interface EventLogService {
     List<TransferLogVO> fetchTransferLogs(String contractAddress, BigInteger fromBlock, BigInteger toBlock);
 
     /**
+     * 需求二（阶段产出）：按【单个区块高度】解析该区块内【全部代币合约】的 ERC-20 Transfer 事件
+     * <p>
+     * 与 {@link #fetchTransferLogs} 的区别是不限定合约地址：eth_getLogs 过滤器省略 address、
+     * 只带 {@code topic[0]=Transfer}，因此一次返回本区块内所有代币的转账。
+     * 每条记录的 contractAddress 即该日志所属的代币合约（{@code Log.getAddress()}），用于区分是哪个代币。
+     * value 为原始 wei（阶段产出不做 decimals() 换算，避免逐合约大量额外 RPC）
+     *
+     * @param blockNumber 区块高度（非负；超过链上最新高度时返回空）
+     * @return 该区块内按日志顺序排列的全部 ERC-20 Transfer
+     */
+    List<TransferLogVO> fetchBlockTransfers(BigInteger blockNumber);
+
+    /**
      * 分页拉取指定合约区间内的 Transfer 日志，按事件蓝图完整解码（含 decimals() 动态精度换算）
      * <p>
      * 非 Transfer 事件在解码阶段直接丢弃；返回的 displayValue 与 Etherscan 展示一致

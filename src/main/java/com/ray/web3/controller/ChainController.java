@@ -6,8 +6,10 @@ import com.ray.web3.model.vo.ApiResponse;
 import com.ray.web3.model.vo.BackfillResultVO;
 import com.ray.web3.model.vo.BalanceVO;
 import com.ray.web3.model.vo.ChainStatusVO;
+import com.ray.web3.model.vo.InternalTransferVO;
 import com.ray.web3.model.vo.TransferLogVO;
 import com.ray.web3.service.ChainService;
+import com.ray.web3.service.DebugTraceService;
 import com.ray.web3.service.DepositWalletService;
 import com.ray.web3.service.EventLogService;
 import com.ray.web3.service.HistoryBackfillService;
@@ -35,6 +37,8 @@ public class ChainController {
 
     private final ChainService chainService;
     private final EventLogService eventLogService;
+    /** 内部交易追溯（需求一）：依赖节点开放 Debug 命名空间，Infura 公共端点不可用，本地 Anvil 可验证 */
+    private final DebugTraceService debugTraceService;
 
     /** 补拉服务受 web3.backfill.enabled 控制，用 ObjectProvider 延迟取得，关闭时不影响应用启动 */
     private final ObjectProvider<HistoryBackfillService> historyBackfillService;
@@ -69,6 +73,15 @@ public class ChainController {
         return ApiResponse.ok(eventLogService.fetchTransferLogs(contract, fromBlock, toBlock));
     }
 
+    @Operation(summary = "按区块高度解析全量 Transfer",
+            description = "输入单个区块高度，用 eth_getLogs 只带 topic[0]=Transfer、不限定合约地址，"
+                    + "返回该区块内【所有代币合约】的 ERC-20 转账（contractAddress 即所属代币）。"
+                    + "需求二阶段产出：Anvil 本地验证时同一区块内部署两个不同代币各发一笔，应输出两条且各自 tokenContract 一致")
+    @GetMapping("/block/{blockNumber}/transfers")
+    public ApiResponse<List<TransferLogVO>> blockTransfers(@PathVariable BigInteger blockNumber) {
+        return ApiResponse.ok(eventLogService.fetchBlockTransfers(blockNumber));
+    }
+
     @Operation(summary = "分页拉取并解码 Transfer 事件", description = "按事件蓝图解码 topics/data，精度动态取自合约 decimals()，非 Transfer 事件丢弃，displayValue 与 Etherscan 展示一致，0xdac17f958d2ee523a2206206994597c13d831ec7")
     @GetMapping("/logs/transfer/decoded/{contract}")
     public ApiResponse<List<TransferEventDTO>> decodedTransferLogs(
@@ -82,6 +95,15 @@ public class ChainController {
     @GetMapping("/tx/{txHash}/transfers")
     public ApiResponse<List<TransferEventDTO>> txTransfers(@PathVariable String txHash) {
         return ApiResponse.ok(eventLogService.fetchTransfersByTx(txHash));
+    }
+
+    @Operation(summary = "内部交易追溯（debug_traceTransaction / callTracer）",
+            description = "回溯交易调用树，提取所有 value>0 的 CALL 内部 ETH 转账 (from, to, value)，"
+                    + "用于对账“经代理/路由合约、日志抓不到的 ETH 到账”。需节点开放 Debug 命名空间："
+                    + "Infura 公共/免费端点不可用（返回 502），本地 Anvil 可验证；定位为旁路补偿，非实时监听主链路")
+    @GetMapping("/tx/{txHash}/internal-transfers")
+    public ApiResponse<List<InternalTransferVO>> internalTransfers(@PathVariable String txHash) {
+        return ApiResponse.ok(debugTraceService.traceInternalTransfers(txHash));
     }
 
     @Operation(summary = "历史 Transfer 日志补拉（断点续传）",

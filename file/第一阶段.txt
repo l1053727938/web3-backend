@@ -37,7 +37,82 @@
   - 什么是内部交易：用户 A 调用合约 B，合约 B 给用户 C 转了 10 ETH。这笔 ETH 转账不会产生单独的 Transaction Hash，只会记录在 Receipt 的 internalTransactions 里。
   - 实操：如何通过 eth_getTransactionReceipt 拿到交易回执？如何追溯这笔内部转账？
   - 阶段产出：写一个 Java 服务，输入一个区块高度，能把该区块里所有的 ERC-20 转账解析出来并打印。
+针对你 Day 5-7 的阶段目标，需要先澄清一个关键的技术事实：内部交易（Internal Tx）无法通过 eth_getTransactionReceipt 直接获取。交易回执只包含事件日志（Logs）和状态结果，不包含合约执行过程中的内部调用链。要追溯内部 ETH 转账，必须使用 debug_traceTransaction 这类调试 API。
 
+基于此，以下是该阶段需求的具体业务梳理。
+
+需求一：内部交易追溯能力（技术预研/难点）
+业务背景：用户通过合约向平台充值 ETH 时，如果中间经过了代理合约或路由合约，ETH 的最终到账可能体现为“内部交易”。这类转账没有独立的交易哈希，常规的日志监听（eth_getLogs）无法捕获，存在漏账风险。
+
+技术现实与需求调整：
+
+澄清：eth_getTransactionReceipt 返回的 Receipt 中不包含 internalTransactions 字段。内部交易是节点在交易执行时追踪生成的，不属于链上存储的数据。
+
+正确方法：需要使用 debug_traceTransaction（配合 callTracer）对可疑交易进行回溯，从调用树中提取 value > 0 的 CALL 记录，识别出最终的 ETH 接收方。
+
+依赖限制：该 API 属于 Debug 命名空间，Infura 免费版和大多数公共 RPC 不开放此接口，通常需要自建归档节点或使用付费的 Dedicated Node 服务。
+
+开发任务：
+
+编写一个工具方法，输入交易哈希，调用 debug_traceTransaction（callTracer），返回该交易执行过程中所有嵌套的 ETH 转账记录（from, to, value）。
+
+在充值对账流程中，对于“用户声称已充值但日志未匹配到”的 ETH 交易，触发此回溯逻辑，人工或自动补录。
+
+暂不作为主监听链路：内部交易追溯定位为旁路补偿机制，而非实时监听主链路。实时监听仍以日志（Log）为主，因为 ERC-20 转账一定会在日志中留下 Transfer 事件。
+
+验收标准：给定一个包含内部 ETH 转账的主网交易哈希，Java 服务能准确输出该笔交易中所有发生 ETH 转移的 (from, to, value) 列表，并与 Etherscan 的“内部交易”标签页数据一致。
+
+需求二：按区块高度解析 ERC-20 转账（阶段产出）
+业务背景：这是本阶段的核心产出——输入一个区块高度，输出该区块内所有 ERC-20 代币的 Transfer 事件。注意，范围不再局限于某一个代币合约，而是该区块中全部 ERC-20 合约的转账。
+
+开发任务：
+
+构建区块级过滤器：
+
+使用 EthFilter，设置 fromBlock = toBlock = 目标区块高度。
+
+不指定合约地址（因为要抓取所有代币）。
+
+只添加一个 Topic：Transfer 事件的签名哈希 0xddf252ad...。
+
+调用 eth_getLogs：执行查询，获取该区块内所有匹配的日志条目。
+
+逐条解码：
+
+对每条 Log，校验 topics[0] 确为 Transfer 签名。
+
+从 topics[1] 提取 from，topics[2] 提取 to，从 data 提取 value。
+
+关键补充：Log.getAddress() 是该条日志所属的代币合约地址。输出结果中必须包含这个合约地址，否则无法区分是哪个代币的转账。
+
+输出模型：每条记录包含：blockNumber、txHash、logIndex、tokenContract（代币合约地址）、from、to、rawValue。
+
+精度处理（可选/降级）：由于无法预知每个代币的 decimals，阶段产出可先输出 rawValue（原始 BigInteger）。若需人类可读金额，需额外调用对应合约的 decimals() 方法，但这会引入大量 RPC 调用，建议作为后续优化项。
+
+验收标准：
+在 Anvil 本地链上部署两个不同的 ERC-20 合约，在同一区块内分别发起转账。调用该 Java 服务并传入该区块高度，输出结果应包含两笔转账记录，且每条记录附带的 tokenContract 地址与各自代币合约地址一致。
+
+需求三（关联补充）：Web3j 对 Debug API 的调用支持
+现状：Web3j 的标准 Web3j 接口未直接封装 debug_traceTransaction。你需要通过底层方式发起请求。
+
+开发任务：
+
+构造自定义的 Request 对象，设置 method = "debug_traceTransaction"。
+
+参数列表：[transactionHash, {"tracer": "callTracer"}]。
+
+通过 Web3j 实例的 send 方法发送，解析返回的 JSON 结构，提取调用树中的 calls 数组。
+
+过滤出 type 为 CALL 且 value 不为 0x0 的节点，即为实际的 ETH 内部转账。
+
+风险提示：该功能依赖节点支持 Debug API。在本地 Anvil 上可以开启（anvil --steps-tracing 或默认支持部分 trace），但 Infura 主网不可用。开发阶段在 Anvil 上验证逻辑即可，生产环境需评估节点方案。
+
+综合优先级建议
+需求	优先级	说明
+需求二：区块内全量 ERC-20 解析	P0（必做）	这是 Day 5-7 明确的阶段产出，也是 CEX 监听器的核心能力，务必完成。
+需求一：内部交易追溯	P1（技术储备）	理解原理并实现工具方法即可，暂不集成到主流程。知道 Receipt 拿不到内部交易，本身就是本阶段的关键认知收获。
+需求三：Debug API 调用封装	P1（配套需求一）	仅在需要验证内部交易追溯时开发，不必过度投入。
+一句话总结：Day 5-7 的交付物是一个“区块内全量 ERC-20 转账解析器”；内部交易部分的核心价值在于认清其数据来源（Trace 而非 Receipt）和可用性限制，避免在后续开发中误以为可以从 Receipt 中直接读取。
 --------------------------------------------------------------------
 
 【第 3 周：Web3j 深度开发（写与发交易）】

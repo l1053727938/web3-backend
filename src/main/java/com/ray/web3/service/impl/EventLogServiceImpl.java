@@ -56,6 +56,7 @@ public class EventLogServiceImpl implements EventLogService {
 
     @Override
     public List<TransferLogVO> fetchTransferLogs(String contractAddress, BigInteger fromBlock, BigInteger toBlock) {
+        ChainParams.requireContract(contractAddress);
         List<TransferLogVO> result = new ArrayList<>();
         for (Log raw : collectLogs(contractAddress, fromBlock, toBlock)) {
             // 按 Transfer 蓝图解码并校验 topic[0]，非目标事件直接丢弃
@@ -66,7 +67,22 @@ public class EventLogServiceImpl implements EventLogService {
     }
 
     @Override
+    public List<TransferLogVO> fetchBlockTransfers(BigInteger blockNumber) {
+        // 需求二：单区块 + 不限定合约（contract=null 使 EthFilter 省略 address，匹配本块全部代币），
+        // 只带 topic[0]=Transfer；解码阶段由 TransferEventDecoder 校验 topic0 并把 log.address 作为代币合约带出
+        ChainParams.requireBlockNumber(blockNumber);
+        List<TransferLogVO> result = new ArrayList<>();
+        for (Log raw : collectLogs(null, blockNumber, blockNumber)) {
+            TransferEventDecoder.extractEventValues(raw)
+                    .ifPresent(values -> result.add(toTransferLog(raw, values)));
+        }
+        log.info("[block-transfers] block={} 解析出全链 ERC-20 Transfer 事件 {} 条", blockNumber, result.size());
+        return result;
+    }
+
+    @Override
     public List<TransferEventDTO> fetchDecodedTransferLogs(String contractAddress, BigInteger fromBlock, BigInteger toBlock) {
+        ChainParams.requireContract(contractAddress);
         return decodeAll(contractAddress, collectLogs(contractAddress, fromBlock, toBlock));
     }
 
@@ -103,10 +119,11 @@ public class EventLogServiceImpl implements EventLogService {
     }
 
     /**
-     * 参数校验 + 链上高度截断 + 按块跨度分段循环拉取，返回区间内的原始日志
+     * 区间校验 + 链上高度截断 + 按块跨度分段循环拉取，返回区间内的原始日志
+     * <p>
+     * contractAddress 允许为 null：表示不限定合约（按区块抓取全部代币的事件），此时 EthFilter 省略 address 字段
      */
     private List<Log> collectLogs(String contractAddress, BigInteger fromBlock, BigInteger toBlock) {
-        ChainParams.requireContract(contractAddress);
         ChainParams.requireRange(fromBlock, toBlock);
 
         // 结束区块不能超过当前链上高度
