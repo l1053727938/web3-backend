@@ -68,11 +68,12 @@ public class EventLogServiceImpl implements EventLogService {
 
     @Override
     public List<TransferLogVO> fetchBlockTransfers(BigInteger blockNumber) {
-        // 需求二：单区块 + 不限定合约（contract=null 使 EthFilter 省略 address，匹配本块全部代币），
+        // 需求二：单区块 + 不限定合约（address 置空列表使 EthFilter 序列化时省略该字段，匹配本块全部代币），
         // 只带 topic[0]=Transfer；解码阶段由 TransferEventDecoder 校验 topic0 并把 log.address 作为代币合约带出
         ChainParams.requireBlockNumber(blockNumber);
+        // 单个块号无需走 collectLogs 的分段循环与链高截断（超高的块号节点直接返回空日志）
         List<TransferLogVO> result = new ArrayList<>();
-        for (Log raw : collectLogs(null, blockNumber, blockNumber)) {
+        for (Log raw : fetchLogsAdaptive(null, blockNumber, blockNumber)) {
             TransferEventDecoder.extractEventValues(raw)
                     .ifPresent(values -> result.add(toTransferLog(raw, values)));
         }
@@ -121,7 +122,7 @@ public class EventLogServiceImpl implements EventLogService {
     /**
      * 区间校验 + 链上高度截断 + 按块跨度分段循环拉取，返回区间内的原始日志
      * <p>
-     * contractAddress 允许为 null：表示不限定合约（按区块抓取全部代币的事件），此时 EthFilter 省略 address 字段
+     * contractAddress 允许为 null：表示不限定合约（按区块抓取全部代币的事件），buildFilter 会把它映射为空地址列表
      */
     private List<Log> collectLogs(String contractAddress, BigInteger fromBlock, BigInteger toBlock) {
         ChainParams.requireRange(fromBlock, toBlock);
@@ -219,13 +220,25 @@ public class EventLogServiceImpl implements EventLogService {
     }
 
     private EthFilter buildFilter(String contractAddress, BigInteger from, BigInteger to) {
+        // contractAddress 为 null 时必须传【空列表】而非 null：EthFilter 构造器对 String 参数做
+        // Collections.singletonList(null)，序列化成 "address":[null] 会被节点拒绝（Invalid JSON /
+        // data types must start with 0x）；空列表序列化为 "address":[]，节点视为不限定合约
         EthFilter filter = new EthFilter(
                 DefaultBlockParameter.valueOf(from),
                 DefaultBlockParameter.valueOf(to),
-                contractAddress);
+                toAddressList(contractAddress));
         // 按事件蓝图自动生成的 topic[0] 在节点侧过滤 Transfer，避免把合约全部日志拉回本地再丢弃
         filter.addSingleTopic(TransferEventDecoder.transferEventTopic());
         return filter;
+    }
+
+    /**
+     * 合约地址 → EthFilter 地址列表：null/空串映射为空列表（不限定合约），杜绝 singletonList(null) 上线
+     */
+    private List<String> toAddressList(String contractAddress) {
+        return contractAddress == null || contractAddress.isEmpty()
+                ? List.of()
+                : List.of(contractAddress);
     }
 
     /**
@@ -269,7 +282,10 @@ public class EventLogServiceImpl implements EventLogService {
     }
 
     /**
-     * 解码结果映射为既有视图对象：from/to 取自 indexed topics，金额取自 data（已在解码阶段丢弃非 Transfer 事件）
+     * 解码结果映射为既有视图对象：from/to 取自 indexed topics，金额取自 data
+     * <p>
+     * 非 Transfer 事件与形态异常的日志（同签名但参数全 indexed、data 为空或畸形）已在
+     * {@link TransferEventDecoder#extractEventValues(Log)} 校验阶段丢弃，返回值固定为 2 个 indexed + 1 个金额
      */
     private TransferLogVO toTransferLog(Log logObject, EventValues values) {
         String from = (String) values.getIndexedValues().getFirst().getValue();

@@ -35,11 +35,11 @@ web3:
     project-id: ${INFURA_PROJECT_ID:}
     # HTTP RPC 代理：本机开了系统代理(如 Clash 127.0.0.1:7890)、Java 默认不走代理会导致主网超时
     # 需要时去掉下面两行注释（或用环境变量 WEB3_PROXY_HOST/WEB3_PROXY_PORT 注入）；留空则直连
-#    proxy-host: ${WEB3_PROXY_HOST:127.0.0.1}
-#    proxy-port: ${WEB3_PROXY_PORT:7890}
-    http-url: http://127.0.0.1:8545
+    proxy-host: ${WEB3_PROXY_HOST:127.0.0.1}
+    proxy-port: ${WEB3_PROXY_PORT:7890}
+#    http-url: http://127.0.0.1:8545
 #    http-url: https://sepolia.infura.io/v3/${INFURA_PROJECT_ID:}
-#    http-url: https://mainnet.infura.io/v3/${INFURA_PROJECT_ID:}
+    http-url: https://mainnet.infura.io/v3/${INFURA_PROJECT_ID:}
 #    http-url: https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
 #    http-url: https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
 #    chain-id: 11155111   # Sepolia 测试网；主网为 1，对应改 https://mainnet.infura.io
@@ -48,7 +48,7 @@ web3:
     log-chunk-size: ${WEB3_LOG_CHUNK_SIZE:50}
   # ============ 历史日志补拉（监听器启动时的状态补齐）============
   backfill:
-    enabled: ${WEB3_BACKFILL_ENABLED:true}
+    enabled: ${WEB3_BACKFILL_ENABLED:false}
     # 单页区块跨度：节点单次结果上限(Infura 10000 条)被打穿时由 EventLogService 自动缩跨度续拉，无需手工调小
     chunk-size: ${WEB3_BACKFILL_CHUNK_SIZE:1000}
     # 单次请求最多推进的区块数，0=不限；设为正数可把大区间拆成多次调用（下次从游标自动续拉）
@@ -56,7 +56,7 @@ web3:
     # 游标读优先走 Redis（关闭后每次直读 MySQL，Redis 不可用时也自动降级）
     cursor-cache-enabled: ${WEB3_BACKFILL_CURSOR_CACHE:true}
     # ===== 定时自动核对：周期性把各合约从游标补拉到链上最新高度，兜底实时链路的缺口 =====
-    auto-enabled: ${WEB3_BACKFILL_AUTO_ENABLED:true}
+    auto-enabled: ${WEB3_BACKFILL_AUTO_ENABLED:false}
     auto-interval-ms: ${WEB3_BACKFILL_AUTO_INTERVAL_MS:30000}
     # 核对合约清单；留空回退 web3.websocket.watch-contracts（实时盯的合约与核对的合约口径一致）
     auto-contracts: ${WEB3_BACKFILL_AUTO_CONTRACTS:0x5FbDB2315678afecb367f032d93F642f64180aa3}
@@ -66,7 +66,7 @@ web3:
   # ============ WebSocket 实时订阅（newHeads & logs）============
   # 默认关闭，需要时打开 enabled（本地 Anvil 或 Infura WS 端点）
   websocket:
-    enabled: ${WEB3_WS_ENABLED:true}
+    enabled: ${WEB3_WS_ENABLED:false}
     # Anvil: ws://127.0.0.1:8545   Infura: wss://mainnet.infura.io/ws/v3/{projectId}
     url: ${WEB3_WS_URL:ws://127.0.0.1:8545}
 #    url: wss://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
