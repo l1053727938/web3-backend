@@ -1,8 +1,12 @@
 package com.ray.web3.config;
 
 import com.ray.web3.interceptor.JwtAuthInterceptor;
-import com.ray.web3.interceptor.TokenBucketRateLimitInterceptor;
+import com.ray.web3.interceptor.RateLimitInterceptor;
+import com.ray.web3.ratelimit.DistributedRateLimitGuard;
+import com.ray.web3.ratelimit.LocalRateLimitGuard;
+import com.ray.web3.ratelimit.RateLimitGuard;
 import com.ray.web3.util.JwtTokenProvider;
+import org.redisson.api.RedissonClient;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -25,7 +29,7 @@ public class SecurityConfig {
     /** 链上查询类接口统一前缀：JWT 拦截范围 */
     private static final String[] PROTECTED_PATHS = {"/api/chain/**"};
 
-    /** eth_getLogs 类高配额消耗接口：令牌桶限流范围（含分页拉取、解码拉取、补拉） */
+    /** eth_getLogs 类高配额消耗接口：入口限流范围（含分页拉取、解码拉取、补拉） */
     private static final String[] LOG_QUERY_PATHS = {"/api/chain/logs/**", "/api/chain/block/**"};
 
     @Bean
@@ -47,8 +51,22 @@ public class SecurityConfig {
 
     @Bean
     @ConditionalOnProperty(prefix = "security.rate-limit", name = "enabled", havingValue = "true")
-    public TokenBucketRateLimitInterceptor tokenBucketRateLimitInterceptor(AuthProperties props) {
-        return TokenBucketRateLimitInterceptor.of(props.getRateLimit());
+    public RateLimitGuard rateLimitGuard(AuthProperties props, ObjectProvider<RedissonClient> redisson) {
+        AuthProperties.RateLimit cfg = props.getRateLimit();
+        if (cfg.getMode() == AuthProperties.RateLimit.Mode.DISTRIBUTED) {
+            RedissonClient client = redisson.getIfAvailable();
+            if (client == null) {
+                throw new IllegalStateException("security.rate-limit.mode=DISTRIBUTED 需要 Redis 就绪（RedissonClient 不可用）");
+            }
+            return new DistributedRateLimitGuard(cfg, client);
+        }
+        return new LocalRateLimitGuard(cfg);
+    }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "security.rate-limit", name = "enabled", havingValue = "true")
+    public RateLimitInterceptor rateLimitInterceptor(RateLimitGuard guard, AuthProperties props) {
+        return new RateLimitInterceptor(guard, props.getRateLimit());
     }
 
     /**
@@ -60,11 +78,11 @@ public class SecurityConfig {
 
         private final AuthProperties props;
         private final ObjectProvider<JwtAuthInterceptor> jwtInterceptor;
-        private final ObjectProvider<TokenBucketRateLimitInterceptor> rateLimitInterceptor;
+        private final ObjectProvider<RateLimitInterceptor> rateLimitInterceptor;
 
         WebMvcInterceptorConfig(AuthProperties props,
                                 ObjectProvider<JwtAuthInterceptor> jwtInterceptor,
-                                ObjectProvider<TokenBucketRateLimitInterceptor> rateLimitInterceptor) {
+                                ObjectProvider<RateLimitInterceptor> rateLimitInterceptor) {
             this.props = props;
             this.jwtInterceptor = jwtInterceptor;
             this.rateLimitInterceptor = rateLimitInterceptor;
@@ -73,6 +91,7 @@ public class SecurityConfig {
         @Override
         public void addInterceptors(InterceptorRegistry registry) {
             // enabled=false 时 Bean 本身不创建（@ConditionalOnProperty），此处双保险跳过注册
+            // 注册顺序：JWT 先于限流——限流分 key 依赖 JWT 写入的 sub 身份
             if (props.getJwt().isEnabled()) {
                 registry.addInterceptor(jwtInterceptor.getObject()).addPathPatterns(PROTECTED_PATHS);
             }

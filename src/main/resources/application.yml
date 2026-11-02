@@ -137,13 +137,34 @@ security:
     clock-skew-seconds: ${API_JWT_SKEW:30}
     # POST /api/auth/token 的访问口令（需请求头 X-Issuer-Key 一致）；置空=签发接口关闭(503)。默认值为本地联调专用口令，生产必须用环境变量覆盖或直接置空关闭
     issuer-access-key: ${API_JWT_ISSUER_KEY:local-dev-issuer}
-  # 入口令牌桶：限 /api/chain/logs/** 与 /api/chain/block/**（eth_getLogs 类高配额消耗接口）
+  # 入口限流：限 /api/chain/logs/** 与 /api/chain/block/**（eth_getLogs 类高配额消耗接口）
+  # 四道闸依次生效：全局速率 → 每用户速率 → 每用户日配额 → 并发槽位；任一挡住即 429
   rate-limit:
     enabled: ${API_RATE_LIMIT_ENABLED:true}
-    # 填充速率（许可/秒）：按 Infura 日配额反推可支撑 QPS 后取下限；允许短时突发（闲置时段令牌可积累）
+    # 限流模式：LOCAL=进程内存桶（单实例口径，多副本各限各的）；DISTRIBUTED=Redisson 分布式桶
+    # （RateType.OVERALL，全集群合计同一口径，多实例部署用这个，需 Redis 就绪）
+    mode: ${API_RATE_LIMIT_MODE:LOCAL}
+    # 洪峰策略：FAST_FAIL=抢不到令牌/许可立即 429（默认，洪峰快速打回不堆线程）；
+    # BOUNDED_QUEUE=最多排队 timeout-ms，排不上才 429（有界等待，平滑吸收短时突发）
+    queue-policy: ${API_RATE_LIMIT_QUEUE_POLICY:FAST_FAIL}
+    # ① 全局入口桶填充速率（许可/秒，DISTRIBUTED 时为全集群合计口径）：按 Infura 日配额反推取下限；
+    # 设 0 或负=关闭全局速率闸门
     permits-per-second: ${API_RATE_LIMIT_QPS:5}
-    # 等令牌超时(ms)：0=取不到立即 429 快速失败；>0=最多阻塞排队该时长
+    # 等令牌/许可超时(ms)：0=取不到立即 429；>0=最多阻塞排队该时长（BOUNDED_QUEUE 下必填且 >0）
     timeout-ms: ${API_RATE_LIMIT_TIMEOUT_MS:0}
+    # ④ 并发槽位上限（同时在处理数）：与下游容量对齐（Hikari 连接/Tomcat 线程），防慢请求堆积打垮 DB；
+    # 设 0 或负=关闭并发闸门。DISTRIBUTED 下为全集群合计（RSemaphore），LOCAL 下为本实例（JDK Semaphore）
+    max-concurrent: ${API_RATE_LIMIT_MAX_CONCURRENT:20}
+    # 排队区容量（BOUNDED_QUEUE 生效）：最多多少个请求在等槽位，队满即 429，防洪峰无限排队耗尽线程内存
+    queue-capacity: ${API_RATE_LIMIT_QUEUE_CAPACITY:50}
+    # 并发许可租期(ms，仅 DISTRIBUTED 生效)：实例崩溃未归还许可时到期自动释放，防许可泄漏
+    concurrency-lease-ms: ${API_RATE_LIMIT_CONCURRENCY_LEASE_MS:60000}
+    # ② 每用户速率闸门：防单个大户独占全局额度；key 优先 JWT sub（需开启 jwt.enabled），无 JWT 回退客户端 IP
+    per-user-enabled: ${API_RATE_LIMIT_PER_USER_ENABLED:false}
+    user-permits-per-second: ${API_RATE_LIMIT_USER_QPS:2}
+    # ③ 每用户每日总量配额闸门：累计调用超上限即拒（与速率无关），按天分键自动重置；防被刷积分
+    quota-enabled: ${API_RATE_LIMIT_QUOTA_ENABLED:false}
+    user-daily-quota: ${API_RATE_LIMIT_USER_DAILY_QUOTA:1000}
 
 # ============ Resilience4j：RPC 容错 ============
 resilience4j:

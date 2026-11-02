@@ -1,5 +1,6 @@
 package com.ray.web3.interceptor;
 
+import com.ray.web3.util.ClientIdentityResolver;
 import com.ray.web3.util.HttpResponseUtil;
 import com.ray.web3.util.JwtTokenProvider;
 import io.jsonwebtoken.Claims;
@@ -52,6 +53,8 @@ public class JwtAuthInterceptor implements HandlerInterceptor {
             HttpResponseUtil.writeJson(response, 403, 403, "权限不足，需要 scope: " + required);
             return false;
         }
+        // 验签通过后把 claims 存入请求属性，供下游限流拦截器按 sub 分 key（ClientIdentityResolver 读取）
+        request.setAttribute(ClientIdentityResolver.ATTR_JWT_CLAIMS, claims);
         return true;
     }
 

@@ -48,19 +48,79 @@ public class AuthProperties {
     @Data
     public static class RateLimit {
 
-        /** 总开关；关闭时 TokenBucketRateLimitInterceptor 不注册 */
+        /** 总开关；关闭时限流拦截器不注册 */
         private boolean enabled = false;
 
         /**
-         * 令牌填充速率（许可/秒）：按 Infura 每日配额反推——
-         * 例：单次日志查询接口平均触发 N 次 RPC，日均配额可支撑 QPS = 日配额/(86400*N)，取安全下限
+         * 限流模式：LOCAL=进程内存桶（Guava，单实例口径，多副本各限各的）；
+         * DISTRIBUTED=Redisson 分布式桶（RateType.OVERALL，所有实例合计同一口径，多实例部署用这个）
+         */
+        private Mode mode = Mode.LOCAL;
+
+        /**
+         * 洪峰策略：FAST_FAIL=抢不到令牌/许可立即 429（默认，配合 timeout-ms=0）；
+         * BOUNDED_QUEUE=最多排队 timeout-ms 毫秒，超预算才 429（有界等待，平滑吸收短时突发）。
+         * 配置键 `queue-policy` 由 Spring 宽松绑定自动映射到驼峰字段 queuePolicy
+         */
+        private QueuePolicy queuePolicy = QueuePolicy.FAST_FAIL;
+
+        /**
+         * 入口桶填充速率（许可/秒，DISTRIBUTED 时为全集群合计口径）：按 Infura 每日配额反推——
+         * 例：单次日志查询接口平均触发 N 次 RPC，日均配额可支撑 QPS = 日配额/(86400*N)，取安全下限。
+         * 设为 0 或负=关闭全局速率闸门（只用并发与配额两道闸）
          */
         private double permitsPerSecond = 5.0D;
 
         /**
          * 等待令牌超时（毫秒）：0=取不到立即拒绝（快速失败，返回 429）；
-         * &gt;0=最多阻塞等待该时长，体现令牌桶“排队容忍短时突发”的另一面
+         * &gt;0=最多阻塞等待该时长，体现令牌桶“排队容忍短时突发”的另一面；BOUNDED_QUEUE 模式下必填且应 >0
          */
         private long timeoutMs = 0L;
+
+        /**
+         * 最大并发许可数（同时在处理的请求数上限）：与下游容量对齐（Hikari 连接数 / Tomcat 线程数），
+         * 防“速率没超但慢请求堆积打垮 DB/线程”。设为 0 或负=关闭并发闸门。
+         * DISTRIBUTED 下是全集群合计口径（Redisson RSemaphore），LOCAL 下是本实例口径（JDK Semaphore）
+         */
+        private int maxConcurrent = 20;
+
+        /**
+         * 排队区容量（BOUNDED_QUEUE 模式生效）：最多允许多少个请求在“等处理槽位”；
+         * 队满则新请求立即 429，避免洪峰下无限排队耗完 Tomcat 线程与内存
+         */
+        private int queueCapacity = 50;
+
+        /**
+         * 并发许可租期（毫秒，仅 DISTRIBUTED 生效）：实例崩溃未能归还许可时，到期自动释放，防许可泄漏
+         */
+        private long concurrencyLeaseMs = 60_000L;
+
+        /** 每用户速率限流开关：防单个大户独占全局额度；key 优先 JWT sub，无 JWT 回退客户端 IP */
+        private boolean perUserEnabled = false;
+
+        /** 每用户速率（许可/秒）：perUserEnabled=true 时生效 */
+        private double userPermitsPerSecond = 2.0D;
+
+        /** 每用户总量配额开关：累计调用量超上限即拒（与速率无关），按天分键自动重置；防被刷积分 */
+        private boolean quotaEnabled = false;
+
+        /** 每用户每日总量上限（次/天）：quotaEnabled=true 时生效；设 0 或负=不限 */
+        private long userDailyQuota = 1000L;
+
+        /** 限流模式 */
+        public enum Mode {
+            /** 进程内存桶（Guava），单实例口径 */
+            LOCAL,
+            /** Redisson 分布式桶，全集群 OVERALL 口径，多实例部署用这个 */
+            DISTRIBUTED
+        }
+
+        /** 洪峰策略 */
+        public enum QueuePolicy {
+            /** 快速失败：抢不到立即 429，不占用线程等待 */
+            FAST_FAIL,
+            /** 有界排队：最多等 timeout-ms，排不上才 429（牺牲少量延迟平滑吸收突发） */
+            BOUNDED_QUEUE
+        }
     }
 }

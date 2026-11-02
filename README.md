@@ -110,6 +110,7 @@ web3-backend
 ├── docs/技术选型.md                            # 技术选型详解
 ├── docs/实时充值业务流程.md                     # 纯业务视角的充值流程说明（不含技术实现）
 ├── docs/HMAC签名方案设计.md                    # 第 2 周：外部调用方/Webhook 的 HMAC 请求签名设计（不含代码）
+├── docs/限流方案设计.md                        # 第 2 周：入口限流四道闸（全局/每用户速率、日配额、并发槽位）+ LOCAL/DISTRIBUTED + 有界排队设计
 └── src/main/java/com/ray/web3
     ├── Web3BackendApplication.java           # 启动类（@EnableScheduling + @MapperScan）
     ├── config/
@@ -122,13 +123,18 @@ web3-backend
     │   ├── WebSocketServiceFactory.java      # service/web3j 工厂（代理隧道收敛点，供断线重连整套重建）
     │   ├── RedisConfig.java                  # RedisTemplate 序列化（Jackson 3）
     │   ├── DepositConfig.java                # 注册 DepositProperties
-    │   ├── AuthProperties.java               # security.*（JWT 鉴权/入口令牌桶限流开关与参数）
-    │   ├── SecurityConfig.java               # 对外 API 安全装配（enabled=true 才条化注册拦截器）
+    │   ├── AuthProperties.java               # security.*（JWT 鉴权 / 入口限流：模式、洪峰策略、四道闸参数）
+    │   ├── SecurityConfig.java               # 对外 API 安全装配（enabled=true 才条件注册拦截器，按 mode 选守卫）
     │   ├── OpenApiConfig.java                # Swagger 文档增强（bearerAuth 方案，让 UI 出现 Authorize 按钮）
     │   └── XxlJobConfig.java                 # XXL-Job 执行器（xxl.job.enabled=true 才加载）
     ├── interceptor/
-    │   ├── JwtAuthInterceptor.java           # JWT 鉴权：拦 /api/chain/**，验签/时效/scope（401/403）
-    │   └── TokenBucketRateLimitInterceptor.java # 入口令牌桶：限 logs/block 查询接口（超速率 429）
+    │   ├── JwtAuthInterceptor.java           # JWT 鉴权：拦 /api/chain/**，验签/时效/scope（401/403），通过后存 claims 供限流分 key
+    │   └── RateLimitInterceptor.java         # 入口限流总闸：委托 RateLimitGuard 过四道闸，afterCompletion 归还并发槽位
+    ├── ratelimit/
+    │   ├── RateLimitGuard.java               # 限流守卫接口：屏蔽 LOCAL/DISTRIBUTED 差异的统一判定契约
+    │   ├── RateLimitDecision.java            # 判定结果（放行携带槽位归还凭据 / 拒绝带原因与 Retry-After）
+    │   ├── LocalRateLimitGuard.java          # 单机守卫（Guava 桶 + JDK 信号量，进程内存口径，零外部依赖）
+    │   └── DistributedRateLimitGuard.java    # 分布式守卫（Redisson，多实例全集群 OVERALL 口径）
     ├── consts/EventConsts.java               # ERC-20 Transfer 事件定义（ABI 编码用）
     ├── consts/PatternConsts.java             # 地址/交易哈希校验正则（各 Service 共用）
     ├── consts/DbConsts.java                  # 批量入库行数常量（全项目单一口径）
@@ -175,6 +181,8 @@ web3-backend
     │   ├── ChainQueryUtils.java              # 无状态链上查询封装（最新区块高度 + 异常转译）
     │   ├── ProxyTunnel.java                  # HTTP CONNECT 隧道 + TLS 升级（wss 代理穿透）
     │   ├── JwtTokenProvider.java             # JWT 签发/校验（HS256）+ scope 与路径→权限映射
+    │   ├── ClientIdentityResolver.java       # 限流分 key 身份解析：JWT sub → X-Forwarded-For → 对端地址
+    │   ├── BoundedQueueRateLimiter.java      # 有界排队原语（处理槽 + 排队预算双约束，洪峰策略 BOUNDED_QUEUE）
     │   ├── LeakyBucketRateLimiter.java       # 自研漏桶（匀速不放大突发，供限流对比实验）
     │   ├── HttpResponseUtil.java             # 拦截器层直写统一 ApiResponse JSON（绕过全局异常处理器）
     │   └── TransferEventDecoder.java         # topic[0] 计算 + 日志→TransferEventDTO 解码
@@ -533,11 +541,20 @@ web3:
   放在 `/api/chain/**` 之外避免“签发接口自己也要 token”的自拦；未配口令返回 503（安全默认，防任意铸造），仅供本地/联调，生产应关闭。
 - **Swagger 调试**：`OpenApiConfig` 注册了 `bearerAuth` 安全方案，Swagger UI 右上角 **Authorize** 按钮粘上接口返回的 `token`（不含 `Bearer ` 前缀），后续请求自动带头。
 
-**2. 入口令牌桶限流**（`TokenBucketRateLimitInterceptor`，Guava `RateLimiter`）
-- 拦 `/api/chain/logs/**`、`/api/chain/block/**`（`eth_getLogs` 类高配额消耗接口）；取不到令牌按 `timeout-ms` 决定排队或立即 429。
-- **为何用令牌桶而非漏桶**：运营后台批量拉历史日志是合法突发，令牌桶允许把闲置时段积累的令牌瞬间消耗；速率上限按 Infura 日配额反推。
-- 与 RPC 侧漏桶互补：Resilience4j `ratelimiter`（`rpc-segment`，见 5.2）垫在监听器与节点之间做下游平滑，本令牌桶守在对外入口做突发放行。
-- `LeakyBucketRateLimiter`（自研漏桶）与行为对比见离线单测 `RateLimiterComparisonTest`，实证“令牌桶放突发、漏桶匀速不放大”。
+**2. 入口限流：四道闸 + 可切换模式与洪峰策略**（`RateLimitInterceptor` 编排，判定委托 `RateLimitGuard`）
+- 拦 `/api/chain/logs/**`、`/api/chain/block/**`（`eth_getLogs` 类高配额消耗接口）；请求需**依次通过全部闸门**才放行，任一挡住即 429：
+  ① 全局速率 → ② 每用户速率 → ③ 每用户日总量配额 → ④ 并发槽位。并发槽位放最后：前三道纯检查不占资源，最后一道才占用处理槽位并要求归还。
+- **两种模式**（`security.rate-limit.mode`）：`LOCAL`=进程内存桶（Guava 令牌桶 + JDK 公平信号量，单实例口径，多副本各限各的，零外部依赖）；
+  `DISTRIBUTED`=Redisson 分布式原语（`RRateLimiter` 的 `RateType.OVERALL` + `RPermitExpirableSemaphore`，**多实例部署所有副本合计同一口径**，需 Redis 就绪）。
+- **两种洪峰策略**（`security.rate-limit.queue-policy`）：`FAST_FAIL`=抢不到令牌/许可立即 429（默认，配 `timeout-ms=0`，洪峰快速打回不堆线程）；
+  `BOUNDED_QUEUE`=最多 `queue-capacity` 个请求排队、每队最长 `timeout-ms`，超预算才 429（`BoundedQueueRateLimiter`：公平信号量管处理槽 + 等待计数器管排队预算，双约束）。
+- **每用户维度**（闸门②③）：key 由 `ClientIdentityResolver` 解析——优先 JWT `sub`（`JwtAuthInterceptor` 验签通过后写入请求属性），无 JWT 回退 `X-Forwarded-For`/对端 IP；
+  速率桶闲置自动回收、日配额按天分键自动重置，被拒请求不消耗配额（与分布式 Lua 同口径）。开关 `per-user-enabled` / `quota-enabled`，默认关。
+- **并发槽位生命周期**：`preHandle` 占用、`afterCompletion` 归还（异常路径也必定执行，不能用 `postHandle`）；`DISTRIBUTED` 下许可带 `concurrency-lease-ms` 租期，实例崩溃未归还时到期自愈防泄漏。
+- **为何入口用令牌桶而非漏桶**：运营后台批量拉历史日志是合法突发，令牌桶允许把闲置时段积累的令牌瞬间消耗；速率上限按 Infura 日配额反推。
+- 与 RPC 侧漏桶互补：Resilience4j `ratelimiter`（`rpc-segment`，见 5.2）垫在监听器与节点之间做下游平滑，本入口限流守在对外侧做突发放行与洪峰防护。
+- `LeakyBucketRateLimiter`（自研漏桶）与令牌桶行为对比见离线单测 `RateLimiterComparisonTest`；四道闸与有界排队的行为由 `LocalRateLimitGuardTest` / `BoundedQueueRateLimiterTest` 覆盖。
+- 完整设计权衡（需求拆解、LOCAL/DISTRIBUTED 口径对比、有界排队原语实现取舍、并发槽位泄漏防护）见 [docs/限流方案设计.md](docs/限流方案设计.md)。
 
 **3. HMAC 请求签名**（外部调用方/Webhook 验源）：本周仅出设计文档 [docs/HMAC签名方案设计.md](docs/HMAC签名方案设计.md)，
 代码实现排期第 8 周提币接口安全部分；签名串规则与 nonce 防重放思路需本周理解到位（第 5.5 周“接口结果不确定”会复用请求唯一标识概念）。
@@ -677,9 +694,18 @@ Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:TOKEN" } http://local
 | `security.jwt.ttl-seconds` | `API_JWT_TTL` | 600 | 签发 JWT 有效期（秒），内部服务间建议 5-15 分钟短时效 |
 | `security.jwt.clock-skew-seconds` | `API_JWT_SKEW` | 30 | 校验允许的时钟偏差（秒），多机部署防轻微 clock skew 误杀 |
 | `security.jwt.issuer-access-key` | `API_JWT_ISSUER_KEY` | `local-dev-issuer` | 签发接口 `POST /api/auth/token` 的访问口令（需头 `X-Issuer-Key` 一致）；置空=关闭签发接口(503)，生产必须覆盖或置空 |
-| `security.rate-limit.enabled` | `API_RATE_LIMIT_ENABLED` | false | 是否给日志/区块查询入口挂令牌桶限流 |
-| `security.rate-limit.permits-per-second` | `API_RATE_LIMIT_QPS` | 5 | 令牌填充速率（许可/秒），按 Infura 日配额反推后取下限 |
-| `security.rate-limit.timeout-ms` | `API_RATE_LIMIT_TIMEOUT_MS` | 0 | 等令牌超时（ms）：0=取不到立即 429；>0=最多阻塞排队该时长 |
+| `security.rate-limit.enabled` | `API_RATE_LIMIT_ENABLED` | false | 是否给日志/区块查询入口挂限流拦截器 |
+| `security.rate-limit.mode` | `API_RATE_LIMIT_MODE` | LOCAL | 限流模式：LOCAL=进程内存桶（单实例口径）；DISTRIBUTED=Redisson 分布式桶（全集群合计口径，多实例部署用） |
+| `security.rate-limit.queue-policy` | `API_RATE_LIMIT_QUEUE_POLICY` | FAST_FAIL | 洪峰策略：FAST_FAIL=抢不到立即 429；BOUNDED_QUEUE=有界排队（最多 queue-capacity 人、每队最长 timeout-ms） |
+| `security.rate-limit.permits-per-second` | `API_RATE_LIMIT_QPS` | 5 | ① 全局入口桶填充速率（许可/秒，DISTRIBUTED 为全集群口径）；0/负=关闭此闸门 |
+| `security.rate-limit.timeout-ms` | `API_RATE_LIMIT_TIMEOUT_MS` | 0 | 等令牌/许可超时（ms）：0=立即 429；>0=最多阻塞排队该时长（BOUNDED_QUEUE 下必填且 >0） |
+| `security.rate-limit.max-concurrent` | `API_RATE_LIMIT_MAX_CONCURRENT` | 20 | ④ 并发槽位上限（同时在处理数），与下游容量对齐；0/负=关闭；DISTRIBUTED 为全集群口径 |
+| `security.rate-limit.queue-capacity` | `API_RATE_LIMIT_QUEUE_CAPACITY` | 50 | 排队区容量（BOUNDED_QUEUE 生效）：队满即 429，防洪峰无限排队耗尽线程内存 |
+| `security.rate-limit.concurrency-lease-ms` | `API_RATE_LIMIT_CONCURRENCY_LEASE_MS` | 60000 | 并发许可租期（ms，仅 DISTRIBUTED）：实例崩溃未归还时到期自动释放，防许可泄漏 |
+| `security.rate-limit.per-user-enabled` | `API_RATE_LIMIT_PER_USER_ENABLED` | false | ② 每用户速率闸门开关（key 优先 JWT sub，无 JWT 回退 IP） |
+| `security.rate-limit.user-permits-per-second` | `API_RATE_LIMIT_USER_QPS` | 2 | 每用户速率（许可/秒），per-user-enabled=true 时生效 |
+| `security.rate-limit.quota-enabled` | `API_RATE_LIMIT_QUOTA_ENABLED` | false | ③ 每用户每日总量配额闸门开关（与速率无关的累计上限） |
+| `security.rate-limit.user-daily-quota` | `API_RATE_LIMIT_USER_DAILY_QUOTA` | 1000 | 每用户每日总量上限（次/天），quota-enabled=true 时生效；0/负=不限 |
 | `management.endpoints.web.exposure.include` | — | `health,info,prometheus,metrics` | Actuator 暴露端点 |
 | `xxl.job.enabled` | `XXL_JOB_ENABLED` | false | 是否启用 XXL-Job 执行器 |
 | `xxl.job.admin.addresses` | `XXL_JOB_ADMIN_ADDRESSES` | `http://localhost:8088/xxl-job-admin` | 调度中心地址 |
