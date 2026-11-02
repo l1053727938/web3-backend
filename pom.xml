@@ -27,6 +27,8 @@
         <resilience4j.version>2.4.0</resilience4j.version>
         <redisson.version>4.8.0</redisson.version>
         <xxl-job.version>3.5.0</xxl-job.version>
+        <jjwt.version>0.13.0</jjwt.version>
+        <guava.version>33.4.8-jre</guava.version>
     </properties>
 
     <dependencies>
@@ -45,6 +47,32 @@
             <groupId>org.web3j</groupId>
             <artifactId>core</artifactId>
             <version>${web3j.version}</version>
+        </dependency>
+
+        <!-- JJWT：API 鉴权（第 2 周）——HS256/HMAC 对称签名，内部服务间 JWT 签发与校验 -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>${jjwt.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>${jjwt.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Guava：RateLimiter 令牌桶（第 2 周限流对比实验与 eth_getLogs 入口突发限流） -->
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+            <version>${guava.version}</version>
         </dependency>
 
         <!-- MyBatis-Plus（Spring Boot 4 专用 starter） -->

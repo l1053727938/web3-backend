@@ -33,9 +33,11 @@
 - **统一响应与异常处理**：`ApiResponse` 封装 + `GlobalExceptionHandler`（RPC 类异常统一转 `502`）
 - **API 文档**：SpringDoc OpenAPI 3.1（`/swagger-ui.html`、`/v3/api-docs`）
 - **可观测性**：Actuator + Micrometer Prometheus
-- **离线单元测试**：13 个 JUnit 5 + Mockito 用例（不依赖真实节点/DB/Redis，覆盖模块四充值路由、热钱包匹配与参数校验口径），`mvn test` 全绿
+- **离线单元测试**：31 个 JUnit 5（含 Mockito）用例（不依赖真实节点/DB/Redis，覆盖模块四充值路由、热钱包匹配、参数校验口径与第 2 周 JWT/限流行为），`mvn test` 全绿
 - **充值业务路由与落库（模块四）**：实时/补拉解出的 Transfer 事件按 `to` 地址比对平台热钱包与用户充值地址（配置中心 + `deposit_wallet` 表），
   命中则以 `(chain_id, txHash, logIndex)` 唯一键幂等写入 `deposit_record`（状态**待确认**），随后 `PUBLISH deposit_channel {json}` 通知下游账务（详见 [5.10](#510-充值业务路由与落库模块四)）
+- **对外 API 安全（第 2 周打底，默认关闭）**：`/api/chain/**` 可选挂 JWT（HS256）鉴权拦截器（无/过期 Token→401、scope 不足→403，健康检查放行）；
+  `eth_getLogs` 类日志/区块查询入口可选挂 Guava 令牌桶限流（超速率→429）；HMAC 请求签名先出设计文档（详见 [5.14](#514-对外-api-安全jwt-鉴权--入口令牌桶第-2-周打底)）
 
 ### 规划中
 - 提币服务、多链扩展、托管钱包；充值确认推进（`PENDING_CONFIRM → CREDITED`）与 `notify_status=FAILED` 的定时重发补偿
@@ -59,6 +61,8 @@
 | RPC 容错 | Resilience4j | 2.4.0（`resilience4j-spring-boot4`） | 重试 + 熔断，需配合 `spring-boot-starter-aspectj` |
 | 任务调度 | Spring Scheduler + XXL-Job | 3.5.0（可选） | 定时核对触发 |
 | API 文档 | SpringDoc OpenAPI | 3.2.0 | Swagger UI |
+| API 鉴权 | JJWT | 0.13.0 | HS256/HMAC 对称签名的 JWT 签发与校验（对外 API 安全打底） |
+| 入口限流 | Guava `RateLimiter` | 33.4.8-jre | 令牌桶实现，守 `eth_getLogs` 类高消耗查询入口 |
 | 监控 | Actuator + Micrometer + Prometheus | Boot BOM | 指标暴露 |
 | 编码简化 | Lombok | Boot BOM | `@Data`/`@Slf4j`/`@RequiredArgsConstructor` |
 
@@ -105,6 +109,7 @@ web3-backend
 ├── sql/schema.sql                            # MySQL 初始化脚本（四张表）
 ├── docs/技术选型.md                            # 技术选型详解
 ├── docs/实时充值业务流程.md                     # 纯业务视角的充值流程说明（不含技术实现）
+├── docs/HMAC签名方案设计.md                    # 第 2 周：外部调用方/Webhook 的 HMAC 请求签名设计（不含代码）
 └── src/main/java/com/ray/web3
     ├── Web3BackendApplication.java           # 启动类（@EnableScheduling + @MapperScan）
     ├── config/
@@ -117,11 +122,18 @@ web3-backend
     │   ├── WebSocketServiceFactory.java      # service/web3j 工厂（代理隧道收敛点，供断线重连整套重建）
     │   ├── RedisConfig.java                  # RedisTemplate 序列化（Jackson 3）
     │   ├── DepositConfig.java                # 注册 DepositProperties
+    │   ├── AuthProperties.java               # security.*（JWT 鉴权/入口令牌桶限流开关与参数）
+    │   ├── SecurityConfig.java               # 对外 API 安全装配（enabled=true 才条化注册拦截器）
+    │   ├── OpenApiConfig.java                # Swagger 文档增强（bearerAuth 方案，让 UI 出现 Authorize 按钮）
     │   └── XxlJobConfig.java                 # XXL-Job 执行器（xxl.job.enabled=true 才加载）
+    ├── interceptor/
+    │   ├── JwtAuthInterceptor.java           # JWT 鉴权：拦 /api/chain/**，验签/时效/scope（401/403）
+    │   └── TokenBucketRateLimitInterceptor.java # 入口令牌桶：限 logs/block 查询接口（超速率 429）
     ├── consts/EventConsts.java               # ERC-20 Transfer 事件定义（ABI 编码用）
     ├── consts/PatternConsts.java             # 地址/交易哈希校验正则（各 Service 共用）
     ├── consts/DbConsts.java                  # 批量入库行数常量（全项目单一口径）
     ├── controller/ChainController.java       # 链上查询 + 历史补拉 + 充值地址配置 REST API（13 个端点）
+    ├── controller/AuthController.java        # POST /api/auth/token 签发接口（受 issuer-access-key 保护，仅 enabled=true 注册）
     ├── listener/ChainEventListener.java      # WS 实时订阅（newHeads + logs，观测用）
     ├── listener/TransferStreamEngine.java    # 模块三：实时订阅引擎（解码入队 + 批量落库路由 + 断线重连 + newHeads 心跳）
     ├── service/
@@ -162,6 +174,9 @@ web3-backend
     │   ├── ChainParams.java                  # 入参校验（合约地址/交易哈希/区块区间，统一抛 IllegalArgumentException）
     │   ├── ChainQueryUtils.java              # 无状态链上查询封装（最新区块高度 + 异常转译）
     │   ├── ProxyTunnel.java                  # HTTP CONNECT 隧道 + TLS 升级（wss 代理穿透）
+    │   ├── JwtTokenProvider.java             # JWT 签发/校验（HS256）+ scope 与路径→权限映射
+    │   ├── LeakyBucketRateLimiter.java       # 自研漏桶（匀速不放大突发，供限流对比实验）
+    │   ├── HttpResponseUtil.java             # 拦截器层直写统一 ApiResponse JSON（绕过全局异常处理器）
     │   └── TransferEventDecoder.java         # topic[0] 计算 + 日志→TransferEventDTO 解码
     └── exception/GlobalExceptionHandler.java # 校验/参数/RPC/交易异常统一响应
 ```
@@ -187,6 +202,7 @@ web3-backend
 | POST | `/api/chain/deposit/wallets` | 新增/更新充值地址（JSON 体），按 `(chainId, 小写地址)` upsert，写完立即失效地址缓存 |
 | DELETE | `/api/chain/deposit/wallets/{address}` | 停用充值地址（`status=0`，历史充值记录保留）；`chainId` 为空取当前链 |
 | POST | `/api/chain/deposit/wallets/refresh` | 强制回源重建地址内存索引（新增/停用后无需等 TTL），返回生效地址数 |
+| POST | `/api/auth/token` | **签发 JWT（本地/联调用）**：需头 `X-Issuer-Key`=`security.jwt.issuer-access-key`；`sub` 必填、`scope` 可选（留空默认 `chain:read log:query deposit:read`）。仅 `security.jwt.enabled=true` 时注册；不在 `/api/chain/**` 拦截范围内（避免自拦）；详见 [5.14](#514-对外-api-安全jwt-鉴权--入口令牌桶第-2-周打底) |
 
 **示例**
 
@@ -502,6 +518,30 @@ web3:
   绝不应由定时任务擅自发起；先手动补拉建立游标（或显式配置起点）后定时任务自动接管；
 - **已追平不空转**：游标 +1 超过链高直接返回；`web3.backfill.enabled=false` 时补拉 Bean 不存在，本扫描器空转不报错。
 
+### 5.14 对外 API 安全：JWT 鉴权 + 入口令牌桶（第 2 周打底）
+链上读接口一旦被封装成服务暴露，需回答“谁可以调用（鉴权）”与“调用太快怎么办（限流）”。此能力为后续资产网关
+“监听器不应被外部随意触发”“提币接口鉴权”做前置，**默认全关**（`security.jwt.enabled` / `security.rate-limit.enabled`），
+关闭时拦截器完全不挂到 MVC 链，对现有调用零影响。
+
+**1. JWT 鉴权**（`JwtAuthInterceptor` + `JwtTokenProvider`，HS256/HMAC 对称签名）
+- 拦 `/api/chain/**`；`/actuator/health`、`/swagger-ui/**`、`/v3/api-docs` 不在拦截范围，即健康检查始终放行。
+- 流程：提取 `Authorization: Bearer <token>` → HS256 验签（容忍 `clock-skew-seconds` 时钟偏差）→ 过期判 401 → 按路径推所需 scope 匹配判 403。
+- claims：`sub`（服务/用户标识）、`scope`（空格分隔权限）、`iat/exp`（内部服务间建议 5-15 分钟短时效）、`jti`（为后续吊销留扩展点）。
+- scope 口径（粗粒度，提币接口第 8 周再细化）：日志/补拉/游标类 → `log:query`；充值地址类 → `deposit:read`；其余链上查询 → `chain:read`。
+- 密钥：`security.jwt.secret` 为 Base64 编码、原始字节 ≥ 32B（HS256 强校验），生产经环境变量注入；本地可用 `JwtTokenProvider.generateSecret()` 生成临时密钥。
+- **签发接口** `POST /api/auth/token`（`AuthController`，仅 `enabled=true` 时注册）：带请求头 `X-Issuer-Key`=`security.jwt.issuer-access-key` 调用，返回 `TokenVO{token,scope,expiresInSecond}`；
+  放在 `/api/chain/**` 之外避免“签发接口自己也要 token”的自拦；未配口令返回 503（安全默认，防任意铸造），仅供本地/联调，生产应关闭。
+- **Swagger 调试**：`OpenApiConfig` 注册了 `bearerAuth` 安全方案，Swagger UI 右上角 **Authorize** 按钮粘上接口返回的 `token`（不含 `Bearer ` 前缀），后续请求自动带头。
+
+**2. 入口令牌桶限流**（`TokenBucketRateLimitInterceptor`，Guava `RateLimiter`）
+- 拦 `/api/chain/logs/**`、`/api/chain/block/**`（`eth_getLogs` 类高配额消耗接口）；取不到令牌按 `timeout-ms` 决定排队或立即 429。
+- **为何用令牌桶而非漏桶**：运营后台批量拉历史日志是合法突发，令牌桶允许把闲置时段积累的令牌瞬间消耗；速率上限按 Infura 日配额反推。
+- 与 RPC 侧漏桶互补：Resilience4j `ratelimiter`（`rpc-segment`，见 5.2）垫在监听器与节点之间做下游平滑，本令牌桶守在对外入口做突发放行。
+- `LeakyBucketRateLimiter`（自研漏桶）与行为对比见离线单测 `RateLimiterComparisonTest`，实证“令牌桶放突发、漏桶匀速不放大”。
+
+**3. HMAC 请求签名**（外部调用方/Webhook 验源）：本周仅出设计文档 [docs/HMAC签名方案设计.md](docs/HMAC签名方案设计.md)，
+代码实现排期第 8 周提币接口安全部分；签名串规则与 nonce 防重放思路需本周理解到位（第 5.5 周“接口结果不确定”会复用请求唯一标识概念）。
+
 ---
 
 ## 六、快速开始
@@ -571,6 +611,26 @@ java -jar target/web3-backend-1.0.0-SNAPSHOT.jar
 且 `SELECT latest_scanned_block FROM block_sync_state WHERE chain_id=1 AND contract_address='0xdac1…'` 与
 `redis-cli get web3:sync:cursor:1:0xdac1…` 均等于请求的 `toBlock`。
 
+开启鉴权与入口限流后的验证（PowerShell，默认关需先置 `API_JWT_ENABLED=true` / `API_RATE_LIMIT_ENABLED=true` 并配好密钥）：
+```powershell
+# 1) 无 Token 访问受保护接口 → 401
+Invoke-RestMethod http://localhost:8080/api/chain/status   # 预期 HTTP 401、body.code=401
+
+# 2) 健康检查不在拦截范围 → 始终 200
+Invoke-RestMethod http://localhost:8080/actuator/health
+
+# 3) 取 token：调签发接口（带 X-Issuer-Key 口令，默认 local-dev-issuer），拿返回的 data.token
+$issuer = "local-dev-issuer"
+$resp = Invoke-RestMethod -Method Post -Headers @{ "X-Issuer-Key" = $issuer } `
+  "http://localhost:8080/api/auth/token?sub=swagger-client"
+$env:TOKEN = $resp.data.token
+
+# 4) 携带有效 JWT 访受保护接口 → 200
+Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:TOKEN" } http://localhost:8080/api/chain/status
+
+# 5) scope 不足（只给 chain:read 的 token 访 /api/chain/logs/**）→ 403；有效 token 下高频打 logs 接口→超速率部分 429
+```
+
 ---
 
 ## 七、配置项一览（`application.yml`）
@@ -612,6 +672,14 @@ java -jar target/web3-backend-1.0.0-SNAPSHOT.jar
 | `resilience4j.retry/circuitbreaker.instances.rpc` | — | 3 次 / 500ms，窗口 20、阈值 50%、开路 30s | 链上查询容错 |
 | `resilience4j.retry/circuitbreaker.instances.rpc-segment` | — | 5 次 / 指数退避 ×2 + 抖动 0.5，熔断同上 | 单段 `eth_getLogs` 容错 |
 | `resilience4j.ratelimiter.instances.rpc-segment` | — | 5 次/秒，等待上限 5s | 主动平滑 RPC 吞吐，避免 Infura 429 |
+| `security.jwt.enabled` | `API_JWT_ENABLED` | false | 是否给 `/api/chain/**` 挂 JWT 鉴权拦截器（见 [5.14](#514-对外-api-安全jwt-鉴权--入口令牌桶第-2-周打底)） |
+| `security.jwt.secret` | `API_JWT_SECRET` | 空 | Base64 HS256 密钥（原始字节 ≥32B），enabled=true 时必填；生产走环境变量 |
+| `security.jwt.ttl-seconds` | `API_JWT_TTL` | 600 | 签发 JWT 有效期（秒），内部服务间建议 5-15 分钟短时效 |
+| `security.jwt.clock-skew-seconds` | `API_JWT_SKEW` | 30 | 校验允许的时钟偏差（秒），多机部署防轻微 clock skew 误杀 |
+| `security.jwt.issuer-access-key` | `API_JWT_ISSUER_KEY` | `local-dev-issuer` | 签发接口 `POST /api/auth/token` 的访问口令（需头 `X-Issuer-Key` 一致）；置空=关闭签发接口(503)，生产必须覆盖或置空 |
+| `security.rate-limit.enabled` | `API_RATE_LIMIT_ENABLED` | false | 是否给日志/区块查询入口挂令牌桶限流 |
+| `security.rate-limit.permits-per-second` | `API_RATE_LIMIT_QPS` | 5 | 令牌填充速率（许可/秒），按 Infura 日配额反推后取下限 |
+| `security.rate-limit.timeout-ms` | `API_RATE_LIMIT_TIMEOUT_MS` | 0 | 等令牌超时（ms）：0=取不到立即 429；>0=最多阻塞排队该时长 |
 | `management.endpoints.web.exposure.include` | — | `health,info,prometheus,metrics` | Actuator 暴露端点 |
 | `xxl.job.enabled` | `XXL_JOB_ENABLED` | false | 是否启用 XXL-Job 执行器 |
 | `xxl.job.admin.addresses` | `XXL_JOB_ADMIN_ADDRESSES` | `http://localhost:8088/xxl-job-admin` | 调度中心地址 |

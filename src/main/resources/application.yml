@@ -8,10 +8,19 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:web3_backend}?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true
     username: ${MYSQL_USERNAME:root}
-    password: ${MYSQL_PASSWORD:root}
+    password: ${MYSQL_PASSWORD:root123}
     hikari:
       maximum-pool-size: 20
       minimum-idle: 5
+      # 连接有效性校验：借出连接前用测试语句验证，剔除被 MySQL/网络中间件静默断开的死连接
+      connection-test-query: SELECT 1
+      # 校验超时(ms)：判定连接是否存活的最长等待
+      validation-timeout: 3000
+      # 获取连接超时(ms)：池耗尽时调用方最长阻塞时间，超时抛 SQLException 而非无限等待
+      connection-timeout: 30000
+      # 连接最大存活(ms)：小于 MySQL wait_timeout，主动回收防服务端单方面断连；空闲连接超时回收
+      max-lifetime: 1800000
+      idle-timeout: 600000
   data:
     redis:
       host: ${REDIS_HOST:localhost}
@@ -39,8 +48,8 @@ web3:
     proxy-port: ${WEB3_PROXY_PORT:7890}
 #    http-url: http://127.0.0.1:8545
 #    http-url: https://sepolia.infura.io/v3/${INFURA_PROJECT_ID:}
-    http-url: https://mainnet.infura.io/v3/${INFURA_PROJECT_ID:}
-#    http-url: https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
+#    http-url: https://mainnet.infura.io/v3/${INFURA_PROJECT_ID:}
+    http-url: https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
 #    http-url: https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
 #    chain-id: 11155111   # Sepolia 测试网；主网为 1，对应改 https://mainnet.infura.io
     chain-id: 1   # Sepolia 测试网；主网为 1，对应改 https://mainnet.infura.io
@@ -68,10 +77,10 @@ web3:
   websocket:
     enabled: ${WEB3_WS_ENABLED:false}
     # Anvil: ws://127.0.0.1:8545   Infura: wss://mainnet.infura.io/ws/v3/{projectId}
-    url: ${WEB3_WS_URL:ws://127.0.0.1:8545}
+#    url: ${WEB3_WS_URL:ws://127.0.0.1:8545}
 #    url: wss://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
 #    url: wss://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
-#    url: wss://mainnet.infura.io/ws/v3/${INFURA_PROJECT_ID:}
+    url: wss://mainnet.infura.io/ws/v3/${INFURA_PROJECT_ID:}
 #    url: wss://sepolia.infura.io/ws/v3/${INFURA_PROJECT_ID:}
     # wss 代理：底层 Java-WebSocket 不读系统代理/JVM 代理参数，必须在此显式配置（留空则直连）
 #    proxy-host: ${WEB3_PROXY_HOST:127.0.0.1}
@@ -113,6 +122,28 @@ web3:
     # 确认阈值(区块数)：写入下游消息供账务判断最终确定性，0=不设置
     confirm-threshold: ${WEB3_DEPOSIT_CONFIRM_THRESHOLD:12}
     # 批量入库与路由分片大小不再可配：统一取常量 DbConsts.INSERT_BATCH_SIZE（流水表与充值表同口径）
+
+# ============ 对外 API 安全（第 2 周：鉴权打底 + 入口限流，默认关闭不影响本地开发）============
+security:
+  # JWT 鉴权：拦截 /api/chain/**（actuator 健康检查/swagger 不拦），无 Token=401、过期或签名无效=401、scope 不足=403
+  jwt:
+    enabled: ${API_JWT_ENABLED:true}
+    # Base64 编码的 HS256 密钥（原始字节 ≥ 32B），仅限本地联调；生产必走环境变量注入。
+    # 本地可用 JwtTokenProvider.generateSecret() 生成临时密钥
+    secret: ${API_JWT_SECRET:ntqm2QZfgwtirHJ9DG3eLJRAjJbgUDzzyNAh0k5hKsk=}
+    # 内部服务间短时效（秒），建议 5-15 分钟；jti 已写入 token，为后续吊销机制留扩展点
+    ttl-seconds: ${API_JWT_TTL:36000}
+    # 校验允许的时钟偏差（秒），多机部署防轻微 clock skew 误杀
+    clock-skew-seconds: ${API_JWT_SKEW:30}
+    # POST /api/auth/token 的访问口令（需请求头 X-Issuer-Key 一致）；置空=签发接口关闭(503)。默认值为本地联调专用口令，生产必须用环境变量覆盖或直接置空关闭
+    issuer-access-key: ${API_JWT_ISSUER_KEY:local-dev-issuer}
+  # 入口令牌桶：限 /api/chain/logs/** 与 /api/chain/block/**（eth_getLogs 类高配额消耗接口）
+  rate-limit:
+    enabled: ${API_RATE_LIMIT_ENABLED:true}
+    # 填充速率（许可/秒）：按 Infura 日配额反推可支撑 QPS 后取下限；允许短时突发（闲置时段令牌可积累）
+    permits-per-second: ${API_RATE_LIMIT_QPS:5}
+    # 等令牌超时(ms)：0=取不到立即 429 快速失败；>0=最多阻塞排队该时长
+    timeout-ms: ${API_RATE_LIMIT_TIMEOUT_MS:0}
 
 # ============ Resilience4j：RPC 容错 ============
 resilience4j:
