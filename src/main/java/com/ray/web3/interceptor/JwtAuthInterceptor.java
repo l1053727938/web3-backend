@@ -46,7 +46,7 @@ public class JwtAuthInterceptor implements HandlerInterceptor {
             writeUnauthorized(response, "Token 无效");
             return false;
         }
-        String required = JwtTokenProvider.requiredScope(request.getRequestURI());
+        String required = JwtTokenProvider.requiredScope(request.getMethod(), request.getRequestURI());
         if (!JwtTokenProvider.hasScope(JwtTokenProvider.scopeOf(claims), required)) {
             log.warn("JWT scope 不足 path={} sub={} required={}",
                     request.getRequestURI(), claims.getSubject(), required);

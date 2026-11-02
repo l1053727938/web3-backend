@@ -8,7 +8,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:web3_backend}?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true
     username: ${MYSQL_USERNAME:root}
-    password: ${MYSQL_PASSWORD:root123}
+    password: ${MYSQL_PASSWORD:root}
     hikari:
       maximum-pool-size: 20
       minimum-idle: 5
@@ -44,15 +44,16 @@ web3:
     project-id: ${INFURA_PROJECT_ID:}
     # HTTP RPC 代理：本机开了系统代理(如 Clash 127.0.0.1:7890)、Java 默认不走代理会导致主网超时
     # 需要时去掉下面两行注释（或用环境变量 WEB3_PROXY_HOST/WEB3_PROXY_PORT 注入）；留空则直连
-    proxy-host: ${WEB3_PROXY_HOST:127.0.0.1}
-    proxy-port: ${WEB3_PROXY_PORT:7890}
-#    http-url: http://127.0.0.1:8545
+#    proxy-host: ${WEB3_PROXY_HOST:127.0.0.1}
+#    proxy-port: ${WEB3_PROXY_PORT:7890}
+    http-url: http://127.0.0.1:8545
 #    http-url: https://sepolia.infura.io/v3/${INFURA_PROJECT_ID:}
 #    http-url: https://mainnet.infura.io/v3/${INFURA_PROJECT_ID:}
-    http-url: https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
+#    http-url: https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
 #    http-url: https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
 #    chain-id: 11155111   # Sepolia 测试网；主网为 1，对应改 https://mainnet.infura.io
-    chain-id: 1   # Sepolia 测试网；主网为 1，对应改 https://mainnet.infura.io
+    # 指向 Anvil 本地链时必须用 31337：EIP-155 签名的 chainId 与节点不符会被交易池直接拒掉（invalid chain id）
+    chain-id: 31337   # Anvil 本地链；主网为 1，Sepolia 为 11155111
     # eth_getLogs 分页单段最大区块跨度，节点限制更严时可调小（如 500/1000）
     log-chunk-size: ${WEB3_LOG_CHUNK_SIZE:50}
   # ============ 历史日志补拉（监听器启动时的状态补齐）============
@@ -122,6 +123,19 @@ web3:
     # 确认阈值(区块数)：写入下游消息供账务判断最终确定性，0=不设置
     confirm-threshold: ${WEB3_DEPOSIT_CONFIRM_THRESHOLD:12}
     # 批量入库与路由分片大小不再可配：统一取常量 DbConsts.INSERT_BATCH_SIZE（流水表与充值表同口径）
+
+  # ============ 模块五：提币发交易（第 3 周：Nonce 管理/Gas 估算/离线签名/广播）============
+  # 默认关闭；打开前必须用环境变量注入热钱包私钥（仅测试网密钥可直接写），私钥绝不下发节点、只本地签名
+  withdraw:
+    enabled: ${WEB3_WITHDRAW_ENABLED:true}
+    # 热钱包裸私钥（0x+64 位 hex）：⚠ 生产切 KMS/HSM（第 8 周），配置项只留取值接入口
+    hot-wallet-private-key: ${WEB3_HOT_WALLET_PRIVATE_KEY:0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}
+    # gas 价格安全系数（千分比）：对 eth_gasPrice 上浮倍数，1200=1.2 倍，拥堵时提升打包概率
+    gas-price-bps: ${WEB3_WITHDRAW_GAS_PRICE_BPS:1200}
+    # gas 用量安全垫（千分比）：对 eth_estimateGas 结果上浮，防上链时状态变化导致 out-of-gas
+    gas-limit-bps: ${WEB3_WITHDRAW_GAS_LIMIT_BPS:1200}
+    # gasLimit 封顶：防估算异常放大烧穿热钱包 ETH（普通 ERC-20 转账实测约 5 万）
+    max-gas-limit: ${WEB3_WITHDRAW_MAX_GAS_LIMIT:500000}
 
 # ============ 对外 API 安全（第 2 周：鉴权打底 + 入口限流，默认关闭不影响本地开发）============
 security:

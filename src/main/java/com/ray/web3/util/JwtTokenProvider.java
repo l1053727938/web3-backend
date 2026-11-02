@@ -107,10 +107,21 @@ public final class JwtTokenProvider {
     }
 
     /**
-     * 按请求路径推导所需权限（本周粗粒度口径，后续提币接口再按注解细化）：
-     * 日志/补拉/游标/对账类 → log:query；充值地址类 → deposit:read；其余链上查询 → chain:read
+     * 按请求路径推导所需权限（提币接口已接入，口径见双参重载）：默认按 GET 语义判定
      */
     public static String requiredScope(String path) {
+        return requiredScope("GET", path);
+    }
+
+    /**
+     * 按请求路径 + HTTP 方法推导所需权限：
+     * 提币提交（POST /api/chain/withdraw/**）→ withdraw:submit（花钱操作独立 scope，只读 token 无法发提币）；
+     * 提币查询 → withdraw:read；日志/补拉/游标类 → log:query；充值地址类 → deposit:read；其余链上查询 → chain:read
+     */
+    public static String requiredScope(String httpMethod, String path) {
+        if (path.startsWith("/api/chain/withdraw")) {
+            return "POST".equalsIgnoreCase(httpMethod) ? "withdraw:submit" : "withdraw:read";
+        }
         if (path.startsWith("/api/chain/logs") || path.contains("/backfill") || path.contains("/cursor")) {
             return "log:query";
         }

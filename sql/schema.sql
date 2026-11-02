@@ -87,3 +87,43 @@ CREATE TABLE IF NOT EXISTS deposit_record
     KEY idx_status_block (status, block_number),
     KEY idx_to_address (chain_id, to_address)
 ) ENGINE = InnoDB COMMENT ='充值记录（热钱包匹配入账，状态待确认）';
+
+-- 钱包 Nonce 分配表（第 3 周：写与发交易）：热钱包对外发交易的 Nonce 由本表单点分配，
+-- 杜绝“读链上 Nonce → 签名 → 广播”窗口期内并发抢重（同 Nonce 后发覆盖先发 = 丢单）。
+-- 分配走 SELECT ... FOR UPDATE 行锁串行化；链上校准规则：next_nonce = max(本表值, 链上 pending)，
+-- 只前进不回退（回退会把已上链 Nonce 再用作 = 双花风险）
+CREATE TABLE IF NOT EXISTS wallet_nonce
+(
+    id         BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    chain_id   BIGINT      NOT NULL COMMENT '链ID，Sepolia=11155111',
+    address    VARCHAR(64) NOT NULL COMMENT '钱包地址（小写），即交易发送方',
+    next_nonce BIGINT      NOT NULL COMMENT '下一个待分配的 Nonce（分配即推进）',
+    updated_at DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    created_at DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    UNIQUE KEY uk_chain_address (chain_id, address)
+) ENGINE = InnoDB COMMENT ='发交易钱包的 Nonce 分配游标';
+
+-- 提币记录表（第 3 周初步）：先落库后广播（INIT→BROADCAST），广播超时结果不确定时
+-- 依据本行记录的 nonce 上链查询判定，而非盲目重试（防双发）。金额列同充值侧口径用字符串：
+-- uint256 最多 78 位，MySQL DECIMAL 最大 65 位容不下
+CREATE TABLE IF NOT EXISTS withdraw_record
+(
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    withdraw_no     VARCHAR(64)  NOT NULL COMMENT '提币单号（对外业务主键）',
+    chain_id        BIGINT       NOT NULL COMMENT '链ID，Sepolia=11155111',
+    contract_address VARCHAR(64) NOT NULL COMMENT '代币合约地址（小写）',
+    from_address    VARCHAR(64)  NOT NULL COMMENT '发起方热钱包地址',
+    to_address      VARCHAR(64)  NOT NULL COMMENT '提币目标地址',
+    raw_value       VARCHAR(78)  NOT NULL COMMENT '提币金额（最小单位整数字符串，容纳 uint256 全量）',
+    nonce           BIGINT       NOT NULL COMMENT '本笔交易占用的 Nonce（卡住替换/结果不确定判定的锚点）',
+    gas_limit       BIGINT       NOT NULL COMMENT '估算并加安全垫后的 gas 上限',
+    gas_price       BIGINT       NOT NULL COMMENT '广播时使用的 gas 单价（wei）',
+    transaction_hash VARCHAR(80)         DEFAULT NULL COMMENT '广播成功后的交易哈希',
+    status          VARCHAR(24)  NOT NULL DEFAULT 'INIT' COMMENT '状态：INIT=已落库未广播，BROADCAST=已广播待确认，SUCCESS/FAILED=Day3-4 追踪回填，REPLACED=被加速交易覆盖',
+    error_message   VARCHAR(512)          DEFAULT NULL COMMENT '失败/拒绝原因（估算 revert、节点拒接等）',
+    updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    UNIQUE KEY uk_withdraw_no (withdraw_no),
+    UNIQUE KEY uk_chain_wallet_nonce (chain_id, from_address, nonce),
+    KEY idx_status (status, updated_at)
+) ENGINE = InnoDB COMMENT ='提币交易记录（构造→签名→广播→追踪）';

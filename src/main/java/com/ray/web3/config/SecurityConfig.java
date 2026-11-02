@@ -29,8 +29,9 @@ public class SecurityConfig {
     /** 链上查询类接口统一前缀：JWT 拦截范围 */
     private static final String[] PROTECTED_PATHS = {"/api/chain/**"};
 
-    /** eth_getLogs 类高配额消耗接口：入口限流范围（含分页拉取、解码拉取、补拉） */
-    private static final String[] LOG_QUERY_PATHS = {"/api/chain/logs/**", "/api/chain/block/**"};
+    /** 入口限流范围：eth_getLogs 类高配额消耗接口（分页拉取、解码拉取、补拉）+ 提币花钱类（防并发重复提交） */
+    private static final String[] RATE_LIMITED_PATHS = {
+            "/api/chain/logs/**", "/api/chain/block/**", "/api/chain/withdraw/**"};
 
     @Bean
     @ConditionalOnProperty(prefix = "security.jwt", name = "enabled", havingValue = "true")
@@ -96,7 +97,7 @@ public class SecurityConfig {
                 registry.addInterceptor(jwtInterceptor.getObject()).addPathPatterns(PROTECTED_PATHS);
             }
             if (props.getRateLimit().isEnabled()) {
-                registry.addInterceptor(rateLimitInterceptor.getObject()).addPathPatterns(LOG_QUERY_PATHS);
+                registry.addInterceptor(rateLimitInterceptor.getObject()).addPathPatterns(RATE_LIMITED_PATHS);
             }
         }
     }

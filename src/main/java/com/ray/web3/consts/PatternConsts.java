@@ -22,6 +22,9 @@ public final class PatternConsts {
     /** 交易哈希：0x + 64 位 hex */
     public static final Pattern TX_HASH_PATTERN = Pattern.compile("^0x[0-9a-fA-F]{64}$");
 
+    /** 裸私钥：0x + 64 位 hex（仅本地签名用，校验口径与其他链上数据同源；⚠ 任何情况下不得透传出境） */
+    public static final Pattern PRIVATE_KEY_PATTERN = Pattern.compile("^0x[0-9a-fA-F]{64}$");
+
     private PatternConsts() {
     }
 
@@ -38,5 +41,10 @@ public final class PatternConsts {
     /** 是否为合法交易哈希（null 视为非法） */
     public static boolean isTxHash(String txHash) {
         return txHash != null && TX_HASH_PATTERN.matcher(txHash).matches();
+    }
+
+    /** 是否为合法的 0x 前缀 64 位 hex 裸私钥（null 视为非法） */
+    public static boolean isPrivateKey(String privateKey) {
+        return privateKey != null && PRIVATE_KEY_PATTERN.matcher(privateKey).matches();
     }
 }
