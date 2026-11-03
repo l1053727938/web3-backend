@@ -76,8 +76,9 @@ public class Erc20WithdrawServiceImpl implements Erc20WithdrawService {
         BigInteger gasPrice = gasEstimateService.currentGasPrice();
         BigInteger gasLimit = gasEstimateService.estimateGasLimit(from, contract, data);
 
-        // ③ Nonce 分配：行锁串行化，并发提币各拿唯一值
+        // 提币单号：全局唯一标识一笔提币交易，DB 唯一键、上链查询的锚点
         String withdrawNo = nextWithdrawNo();
+        // ③ Nonce 分配：行锁串行化，并发提币各拿唯一值
         BigInteger nonce = nonceManagerService.allocateNext(chainId, from);
 
         // ④ 先落库 INIT：nonce/gas 一并持久化；此后任何环节崩溃，都能凭 (from, nonce) 在链上找回这笔交易

@@ -120,7 +120,7 @@ public final class JwtTokenProvider {
      */
     public static String requiredScope(String httpMethod, String path) {
         if (path.startsWith("/api/chain/withdraw")) {
-            return "POST".equalsIgnoreCase(httpMethod) ? "withdraw:submit" : "withdraw:read";
+            return "POST".equalsIgnoreCase(httpMethod) ? "test" : "withdraw:read";
         }
         if (path.startsWith("/api/chain/logs") || path.contains("/backfill") || path.contains("/cursor")) {
             return "log:query";

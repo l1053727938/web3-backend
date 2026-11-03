@@ -8,7 +8,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:web3_backend}?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true
     username: ${MYSQL_USERNAME:root}
-    password: ${MYSQL_PASSWORD:root}
+    password: ${MYSQL_PASSWORD:root123}
     hikari:
       maximum-pool-size: 20
       minimum-idle: 5
@@ -136,6 +136,18 @@ web3:
     gas-limit-bps: ${WEB3_WITHDRAW_GAS_LIMIT_BPS:1200}
     # gasLimit 封顶：防估算异常放大烧穿热钱包 ETH（普通 ERC-20 转账实测约 5 万）
     max-gas-limit: ${WEB3_WITHDRAW_MAX_GAS_LIMIT:500000}
+    # ===== Day 3-4：广播后状态追踪（轮询 eth_getTransactionReceipt 推进 BROADCAST→SUCCESS/FAILED）=====
+    # 追踪开关：关闭时只广播不自动推进终态（仍可手动 GET /api/chain/withdraw/{withdrawNo} 观测）
+    track-enabled: ${WEB3_WITHDRAW_TRACK_ENABLED:true}
+    # 轮询间隔(ms)：交易从广播到回填终态的最大延迟量级
+    track-interval-ms: ${WEB3_WITHDRAW_TRACK_INTERVAL_MS:15000}
+    # 单轮最多扫描笔数：限批防一次性向节点发大量收据查询打爆 RPC 配额
+    track-batch-size: ${WEB3_WITHDRAW_TRACK_BATCH_SIZE:100}
+    # 成功所需确认数：0=收据 status=0x1 即成功；>0 需 (链高-收据块高+1)≥此值，防区块重组误判（同充值侧口径）
+    track-confirmations: ${WEB3_WITHDRAW_TRACK_CONFIRMATIONS:12}
+    # 卡单判定阈值(ms)：BROADCAST 停留超过本时长即标注为卡单（只写 error_message、不改状态，等 Day 5-7 自动加速或人工处置）
+    # 年龄按 created_at 计算；取值依链出块间隔定，10min ≈ ETH PoS 50 块；本地 Anvil 按需出块可设很大值关闭误报
+    track-stuck-timeout-ms: ${WEB3_WITHDRAW_TRACK_STUCK_TIMEOUT_MS:600000}
 
 # ============ 对外 API 安全（第 2 周：鉴权打底 + 入口限流，默认关闭不影响本地开发）============
 security:
@@ -150,7 +162,7 @@ security:
     # 校验允许的时钟偏差（秒），多机部署防轻微 clock skew 误杀
     clock-skew-seconds: ${API_JWT_SKEW:30}
     # POST /api/auth/token 的访问口令（需请求头 X-Issuer-Key 一致）；置空=签发接口关闭(503)。默认值为本地联调专用口令，生产必须用环境变量覆盖或直接置空关闭
-    issuer-access-key: ${API_JWT_ISSUER_KEY:local-dev-issuer}
+    issuer-access-key: ${API_JWT_ISSUER_KEY:local}
   # 入口限流：限 /api/chain/logs/** 与 /api/chain/block/**（eth_getLogs 类高配额消耗接口）
   # 四道闸依次生效：全局速率 → 每用户速率 → 每用户日配额 → 并发槽位；任一挡住即 429
   rate-limit:
