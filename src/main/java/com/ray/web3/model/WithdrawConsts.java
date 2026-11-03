@@ -1,5 +1,7 @@
 package com.ray.web3.model;
 
+import java.math.BigInteger;
+
 /**
  * 提币业务常量（第 3 周：写与发交易）
  * <p>
@@ -21,7 +23,7 @@ public final class WithdrawConsts {
         public static final String SUCCESS = "SUCCESS";
         /** 估算失败 / 节点拒接 / 上链 Revert，error_message 记录原因 */
         public static final String FAILED = "FAILED";
-        /** 被同 Nonce 的加速交易覆盖（Replace-by-fee，Day 5-7） */
+        /** 被同 Nonce 的加速/撤销交易覆盖作废（Replace-by-fee，Day 5-7）：本笔提币再不可能上链执行 */
         public static final String REPLACED = "REPLACED";
 
         private Status() {
@@ -33,4 +35,10 @@ public final class WithdrawConsts {
 
     /** 提币单号前缀（WD + 时间戳 + 随机段，生成口径同充值单号 DP） */
     public static final String WITHDRAW_NO_PREFIX = "WD";
+
+    /**
+     * 撤销空交易的 gas 上限（Day 5-7）：原生 ETH 转账（含转给自己）执行路径固定，恒耗 21000 gas，
+     * 无需调 eth_estimateGas——走估算反而多一次 RPC 且可能受余额/合约状态干扰
+     */
+    public static final BigInteger CANCEL_GAS_LIMIT = BigInteger.valueOf(21000L);
 }

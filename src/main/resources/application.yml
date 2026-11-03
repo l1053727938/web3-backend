@@ -145,9 +145,22 @@ web3:
     track-batch-size: ${WEB3_WITHDRAW_TRACK_BATCH_SIZE:100}
     # 成功所需确认数：0=收据 status=0x1 即成功；>0 需 (链高-收据块高+1)≥此值，防区块重组误判（同充值侧口径）
     track-confirmations: ${WEB3_WITHDRAW_TRACK_CONFIRMATIONS:12}
-    # 卡单判定阈值(ms)：BROADCAST 停留超过本时长即标注为卡单（只写 error_message、不改状态，等 Day 5-7 自动加速或人工处置）
+    # 卡单判定阈值(ms)：BROADCAST 停留超过本时长即标注为卡单（只写 error_message、不改状态），也是下方自动加速的入场门槛
     # 年龄按 created_at 计算；取值依链出块间隔定，10min ≈ ETH PoS 50 块；本地 Anvil 按需出块可设很大值关闭误报
     track-stuck-timeout-ms: ${WEB3_WITHDRAW_TRACK_STUCK_TIMEOUT_MS:600000}
+    # ===== Day 5-7：卡单加速（Replace-by-fee）与撤销覆盖 =====
+    # 自动加速开关：关闭时只标注卡单不提价重播（人工端点仍可用）
+    accelerate-enabled: ${WEB3_WITHDRAW_ACCELERATE_ENABLED:true}
+    # 加速扫描间隔(ms)：每轮最多提价一次，需明显大于轮询间隔，否则很快耗光加速次数预算
+    accelerate-interval-ms: ${WEB3_WITHDRAW_ACCELERATE_INTERVAL_MS:60000}
+    # 单轮最多处理卡单笔数：限批防大量重签广播打爆 RPC 配额
+    accelerate-batch-size: ${WEB3_WITHDRAW_ACCELERATE_BATCH_SIZE:20}
+    # 提价幅度(千分比)：新价=原价×(1000+bump)/1000 向上取整；节点对替换交易有最低加价要求（geth 10%、OpenEthereum 12.5%）
+    accelerate-bump-bps: ${WEB3_WITHDRAW_ACCELERATE_BUMP_BPS:125}
+    # 单笔最多加速次数：达上限即停止自动并标注转人工（防无限提价烧穿热钱包 ETH）
+    accelerate-max-count: ${WEB3_WITHDRAW_ACCELERATE_MAX_COUNT:3}
+    # 加速后 gas 单价封顶(wei)：候选价超本值就放弃自动加速，默认 200 gwei（×max-gas-limit 即单笔最贵 0.1 ETH）
+    accelerate-max-gas-price: ${WEB3_WITHDRAW_ACCELERATE_MAX_GAS_PRICE:200000000000}
 
 # ============ 对外 API 安全（第 2 周：鉴权打底 + 入口限流，默认关闭不影响本地开发）============
 security:

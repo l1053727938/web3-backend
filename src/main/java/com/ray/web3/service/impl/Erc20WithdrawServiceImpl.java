@@ -9,6 +9,7 @@ import com.ray.web3.model.entity.WithdrawRecord;
 import com.ray.web3.service.Erc20WithdrawService;
 import com.ray.web3.service.GasEstimateService;
 import com.ray.web3.service.NonceManagerService;
+import com.ray.web3.util.GasRepriceUtils;
 import com.ray.web3.util.TransactionSigner;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -35,7 +36,8 @@ import java.time.format.DateTimeFormatter;
  *   <li>广播被节点<b>确定性拒绝</b>才回拨 Nonce 游标；超时/连接类失败一律不回拨——
  *       交易可能已进内存池，回拨复用 = 双花风险。</li>
  * </ol>
- * 确认追踪（BROADCAST→SUCCESS/FAILED）为 Day 3-4 交付，Replace-by-fee 加速为 Day 5-7 交付
+ * 确认追踪（BROADCAST→SUCCESS/FAILED）为 Day 3-4 交付；本类的 {@link #accelerateWithdraw} /
+ * {@link #cancelWithdraw} 是 Day 5-7 的替换交易能力，它们走相反的规则：<b>绝不回拨 Nonce</b>（该值已被本行占用）
  */
 @Slf4j
 @Service
@@ -99,6 +101,133 @@ public class Erc20WithdrawServiceImpl implements Erc20WithdrawService {
             throw new IllegalArgumentException("提币记录不存在: " + withdrawNo);
         }
         return record;
+    }
+
+    @Override
+    public WithdrawRecord accelerateWithdraw(String withdrawNo) {
+        WithdrawRecord record = requireReplaceable(withdrawNo);
+        long chainId = requireChainId();
+        Credentials creds = resolveCredentials();
+
+        // 逐字段复现原交易（同合约/同收款人/同金额/同 nonce/同 gasLimit），只换 gasPrice：
+        // 语义上仍是“同一笔提币”，所以才能把新交易哈希原地回填到本行
+        String data = TransactionSigner.encodeErc20Transfer(record.getContractAddress(),
+                record.getToAddress(), new BigInteger(record.getRawValue()));
+        BigInteger gasPrice = repriceForReplacement(record);
+
+        String signedHex = TransactionSigner.sign(
+                TransactionSigner.buildErc20Transfer(record.getNonce(), gasPrice, record.getGasLimit(),
+                        record.getContractAddress(), data), chainId, creds);
+
+        String newHash = sendReplacement(record, signedHex, "加速");
+        int updated = withdrawRecordMapper.markAccelerated(withdrawNo, newHash, gasPrice);
+        if (updated == 0) {
+            // 极小竞态窗口：广播期间追踪刚把本行推成终态（说明原交易已中块），新交易大概率被节点拒或成孤立交易
+            log.error("[withdraw] 加速回填 0 行（状态已被并发追踪推进），需人工核对 newTx={} withdrawNo={}",
+                    newHash, withdrawNo);
+        } else {
+            log.info("[withdraw] 加速重播 withdrawNo={} nonce={} price {}→{} tx {}→{}",
+                    withdrawNo, record.getNonce(), record.getGasPrice(), gasPrice,
+                    record.getTransactionHash(), newHash);
+        }
+        return queryWithdraw(withdrawNo);
+    }
+
+    @Override
+    public WithdrawRecord cancelWithdraw(String withdrawNo) {
+        WithdrawRecord record = requireReplaceable(withdrawNo);
+        long chainId = requireChainId();
+        Credentials creds = resolveCredentials();
+        BigInteger gasPrice = repriceForReplacement(record);
+
+        // 同 nonce 的空交易：节点只按 (from, nonce) 认交易身份，不看内容——它一进内存池，原提币交易即作废
+        String signedHex = TransactionSigner.sign(
+                TransactionSigner.buildEmptyTransfer(record.getNonce(), gasPrice,
+                        WithdrawConsts.CANCEL_GAS_LIMIT, record.getFromAddress()), chainId, creds);
+
+        String cancelHash = sendReplacement(record, signedHex, "撤销");
+        // 撤销者哈希只写备注：transaction_hash 必须继续代指原提币交易，否则追踪会拿空交易的成功收据误判 SUCCESS
+        String note = "已撤销：同 nonce 空交易 " + cancelHash + " 覆盖原交易 "
+                + record.getTransactionHash() + "，本笔提币不再执行，资金侧待解冻退款（第 8 周业务编排）";
+        int updated = withdrawRecordMapper.markReplaced(withdrawNo, note);
+        if (updated == 0) {
+            log.error("[withdraw] 撤销回填 0 行（状态已被并发追踪推进），需人工核对 cancelTx={} withdrawNo={}",
+                    cancelHash, withdrawNo);
+        } else {
+            log.warn("[withdraw] 撤销覆盖 withdrawNo={} nonce={} cancelTx={} note={}",
+                    withdrawNo, record.getNonce(), cancelHash, note);
+        }
+        return queryWithdraw(withdrawNo);
+    }
+
+    /**
+     * 取出一笔可替换的 BROADCAST 记录并做两项前置校验：
+     * <ol>
+     *   <li>状态必须是 BROADCAST——INIT 未确认广播结果、终态不可逆，都不允许再拿它的 nonce 发东西；</li>
+     *   <li>发送方必须与当前配置的热钱包一致——换密钥/多钱包场景下代签会把别人的 nonce 花掉，
+     *       且签出的 nonce 与实际发送方不匹配，交易只会白跑一次 RPC。</li>
+     * </ol>
+     */
+    private WithdrawRecord requireReplaceable(String withdrawNo) {
+        WithdrawRecord record = queryWithdraw(withdrawNo);
+        if (!WithdrawConsts.Status.BROADCAST.equals(record.getStatus())) {
+            throw new IllegalStateException("仅 BROADCAST 状态的交易可被加速/撤销，当前 status="
+                    + record.getStatus() + " withdrawNo=" + withdrawNo);
+        }
+        String current = TransactionSigner.addressOf(resolveCredentials());
+        if (!current.equals(record.getFromAddress())) {
+            throw new IllegalStateException("提币发送方 " + record.getFromAddress()
+                    + " 与当前热钱包 " + current + " 不一致，拒绝代签替换交易");
+        }
+        return record;
+    }
+
+    /**
+     * 算本次替换的 gas 单价：先按配置提价（保证严格高于原价、过节点的最低加价门槛），再与链上实时价取大
+     * ——链价整体涨过一轮时，只提 12.5% 仍排在队尾白等。取链价失败不阻断，降级用纯提价值（它本身已满足替换门槛）。
+     * <p>
+     * 候选价超封顶直接报错：自动加速的调用方会把它当作“本笔转人工”依据，不静默降低价格硬广播
+     */
+    private BigInteger repriceForReplacement(WithdrawRecord record) {
+        BigInteger bumped = GasRepriceUtils.bump(record.getGasPrice(), withdrawProperties.getAccelerateBumpBps());
+        BigInteger chainPrice = null;
+        try {
+            chainPrice = gasEstimateService.currentGasPrice();
+        } catch (Exception e) {
+            log.warn("[withdraw] 取链上 gas 价失败，本次替换只用提价值 withdrawNo={} : {}",
+                    record.getWithdrawNo(), e.getMessage());
+        }
+        BigInteger candidate = GasRepriceUtils.candidate(bumped, chainPrice);
+        if (GasRepriceUtils.exceedsCap(candidate, withdrawProperties.getAccelerateMaxGasPrice())) {
+            throw new IllegalStateException("替换放弃：候选 gasPrice=" + candidate + " 超封顶 "
+                    + withdrawProperties.getAccelerateMaxGasPrice() + "，转人工处置 withdrawNo="
+                    + record.getWithdrawNo());
+        }
+        return candidate;
+    }
+
+    /**
+     * 广播替换/撤销交易。与首次广播 {@link #broadcast} 的关键差别：<b>任何失败都不回拨 Nonce、不改库</b>——
+     * 本行 Nonce 早已被原提币占用，回拨等于把它再分配给别人 = 双花；而原交易仍在内存池里，
+     * 下一轮追踪/加速照常进行
+     * <p>
+     * 常见确定性拒因都不在此处下结论：{@code nonce too low}（原交易已中块）、
+     * {@code replacement transaction underpriced}（提价幅度不够）、{@code already known}（同一笔重发）
+     */
+    private String sendReplacement(WithdrawRecord record, String signedHex, String action) {
+        EthSendTransaction response;
+        try {
+            response = web3j.ethSendRawTransaction(signedHex).send();
+        } catch (Exception e) {
+            throw new IllegalStateException(action + "交易广播结果不确定（网络/超时），保持原状待下一轮: "
+                    + e.getMessage(), e);
+        }
+        if (response.hasError()) {
+            throw new IllegalStateException(action + "交易被节点拒绝（原交易不受影响）: "
+                    + response.getError().getMessage() + " withdrawNo=" + record.getWithdrawNo()
+                    + " nonce=" + record.getNonce());
+        }
+        return response.getTransactionHash();
     }
 
     /**

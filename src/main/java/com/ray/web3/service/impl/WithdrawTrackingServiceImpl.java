@@ -7,11 +7,14 @@ import com.ray.web3.model.entity.WithdrawRecord;
 import com.ray.web3.service.NonceManagerService;
 import com.ray.web3.service.WithdrawTrackingService;
 import com.ray.web3.util.ChainQueryUtils;
+import com.ray.web3.util.TransactionSigner;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 import org.web3j.protocol.Web3j;
+import org.web3j.protocol.core.DefaultBlockParameter;
+import org.web3j.protocol.core.methods.response.EthCall;
 import org.web3j.protocol.core.methods.response.EthGetTransactionReceipt;
 import org.web3j.protocol.core.methods.response.EthTransaction;
 import org.web3j.protocol.core.methods.response.Transaction;
@@ -33,7 +36,11 @@ import java.util.Optional;
  * RPC 失败一律"保持 BROADCAST 不猜测"：查不到收据/网络异常都留给下一轮，绝不在结果不确定时误判终态
  * ——这与广播层"超时不回拨 Nonce、保留锚点"是同一条不确定性处理原则
  * <p>
- * 针对"永远不中块 / 永远凑不够确认数"这类活性问题，本轮只做到"发现与分类"（自动修复属 Day 5-7，不在本类里抢跑）：
+ * 终态门槛对称：{@code SUCCESS} 与 {@code FAILED} 都必须先过 {@code track-confirmations} 确认数门槛才落库
+ * ——收据 status 只代表当前节点的规范链视图，浅块 Revert 可能因重组变成成功，而 FAILED 会触发不可逆的解冻退款
+ * <p>
+ * 针对"永远不中块 / 永远凑不够确认数"这类活性问题，本类只做到"发现与分类"（自动提价重播在
+ * {@code WithdrawAccelerateServiceImpl}，不在本类里抢跑）：
  * <ul>
  *   <li>{@link WithdrawRecordMapper#touchBroadcast} 心跳：未出结果的记录回写 {@code updated_at} 排到队尾，
  *       否则卡单会因 {@code updated_at} 永不变化而永久霸占 {@code selectByStatus} 队头，满 batch 后把新交易的
@@ -41,6 +48,8 @@ import java.util.Optional;
  *   <li>卡单标注：{@code BROADCAST} 年龄（算 {@code created_at}，不算已被心跳占用的 {@code updated_at}）超过
  *       {@code track-stuck-timeout-ms} 时，诊断成因并一次性写进 {@code error_message}，供告警与后续自动加速取用；</li>
  *   <li>{@link #diagnoseStuck} 只读三分判定，不碰状态机。</li>
+ *   <li>Revert 原因挖掘（Day 5-7）：收据不带 revertReason 时用 {@code eth_call} 在原交易所在块的
+ *       <b>前一块</b>状态上重放一次，把合约 {@code require} 的原文拿回来写进 {@code error_message}。</li>
  * </ul>
  */
 @Slf4j
@@ -51,6 +60,9 @@ public class WithdrawTrackingServiceImpl implements WithdrawTrackingService {
 
     /** error_message 落库长度上限：与 schema 中 VARCHAR(512) 对齐，预留冗余截断防超长写入报错 */
     private static final int ERROR_MESSAGE_MAX_LEN = 500;
+
+    /** 节点返回的 revert 通用前缀（大小写不敏感比较），重放取因后需剔掉才知道合约自己说了什么 */
+    private static final String PREFIX_EXECUTION_REVERTED = "execution reverted";
 
     private final Web3j web3j;
     private final WithdrawRecordMapper withdrawRecordMapper;
@@ -137,32 +149,20 @@ public class WithdrawTrackingServiceImpl implements WithdrawTrackingService {
         }
         TransactionReceipt receipt = receiptOpt.get();
 
-        // 执行 Revert：status=0x0，直接判 FAILED（无需等确认数，失败已确定）
-        if (!receipt.isStatusOK()) {
-            String reason = receipt.getRevertReason() != null
-                    ? receipt.getRevertReason()
-                    : "上链执行 Revert（receipt.status=0x0）";
-            int updated = withdrawRecordMapper.markReverted(record.getWithdrawNo(), truncate(reason));
-            if (updated > 0) {
-                log.warn("[withdraw-track] 交易上链 Revert → FAILED withdrawNo={} tx={}",
-                        record.getWithdrawNo(), txHash);
-            }
-            return updated > 0;
+        // 确认数门槛对成败一视同仁，必须卡在 status 判定之前（防 FAILED 误判双花，见下方方法注释）
+        if (!confirmationsSettled(record, receipt, latest)) {
+            return false;
         }
 
-        // status=0x1 但需确认数达标才转 SUCCESS，防区块重组误判
-        long required = withdrawProperties.getTrackConfirmations();
-        if (required > 0) {
-            BigInteger minedBlock = receipt.getBlockNumber();
-            if (minedBlock == null || latest == null) {
-                return false; // 高度信息不足以判定，等下一轮
+        // 执行 Revert：status=0x0 → FAILED（已经确认数门槛，不再拿浅块结论写不可逆终态）
+        if (!receipt.isStatusOK()) {
+            String reason = resolveRevertReason(record, receipt);
+            int updated = withdrawRecordMapper.markReverted(record.getWithdrawNo(), truncate(reason));
+            if (updated > 0) {
+                log.warn("[withdraw-track] 交易上链 Revert 且确认达标 → FAILED withdrawNo={} tx={} reason={}",
+                        record.getWithdrawNo(), txHash, reason);
             }
-            long confirmations = latest.subtract(minedBlock).longValue() + 1;
-            if (confirmations < required) {
-                log.debug("[withdraw-track] 确认不足保持 BROADCAST withdrawNo={} conf={}/{}",
-                        record.getWithdrawNo(), confirmations, required);
-                return false;
-            }
+            return updated > 0;
         }
 
         int updated = withdrawRecordMapper.markSuccess(record.getWithdrawNo());
@@ -171,6 +171,35 @@ public class WithdrawTrackingServiceImpl implements WithdrawTrackingService {
                     record.getWithdrawNo(), txHash, record.getNonce());
         }
         return updated > 0;
+    }
+
+    /**
+     * 收据是否已足够最终：确认数达标才允许落终态，{@code SUCCESS} 与 {@code FAILED} 共用同一道门槛
+     * <p>
+     * 为何 FAILED 也要等：收据里的 status 只代表<b>当前节点认定的规范链</b>，区块重组、节点短暂分叉、
+     * 自建节点重启丢块都可能使同一个 txHash 的收据换成另一条链上的那份，0x0 可变 0x1。
+     * 而 FAILED 在业务侧触发解冻退款（一笔新的资金流出，不可追），浅块 Revert 就写 FAILED 会导致
+     * “链上实际付出 + 账本退款”双花；SUCCESS 早判至少还能靠对账纠偏，所以两道门槛必须对称
+     * <p>
+     * {@code track-confirmations=0} 时不判定（即时落终态，仅供测试链复现）；
+     * 高度信息缺失或重组导致区块高度回退（minedBlock &gt; latest）一律判不足，宁可多等一轮
+     */
+    private boolean confirmationsSettled(WithdrawRecord record, TransactionReceipt receipt, BigInteger latest) {
+        long required = withdrawProperties.getTrackConfirmations();
+        if (required <= 0) {
+            return true;
+        }
+        BigInteger minedBlock = receipt.getBlockNumber();
+        if (minedBlock == null || latest == null) {
+            return false; // 高度信息不足以判定，等下一轮
+        }
+        long confirmations = latest.subtract(minedBlock).longValue() + 1;
+        if (confirmations < required) {
+            log.debug("[withdraw-track] 确认不足保持 BROADCAST withdrawNo={} conf={}/{} status={}",
+                    record.getWithdrawNo(), confirmations, required, receipt.getStatus());
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -249,6 +278,73 @@ public class WithdrawTrackingServiceImpl implements WithdrawTrackingService {
     /** 记录年龄(ms)：基于 {@code created_at} 而非 {@code updated_at}，后者已被心跳占用为"最后观察时间" */
     private long elapsedMs(LocalDateTime createdAt) {
         return createdAt == null ? 0L : Duration.between(createdAt, LocalDateTime.now()).toMillis();
+    }
+
+    /**
+     * 取 Revert 的具体原因（Day 5-7 异常捕获）：收据里带 revertReason 就直接用（多数公共节点不带），
+     * 否则重放一次再退到通用文案
+     * <p>
+     * 重放只是补一份原因文本：拿不到也照写 FAILED 不误，“因为缺原因就不落终态”会把成功已知失败的交易吊住
+     */
+    private String resolveRevertReason(WithdrawRecord record, TransactionReceipt receipt) {
+        String fromReceipt = receipt.getRevertReason();
+        if (fromReceipt != null && !fromReceipt.isBlank()) {
+            return fromReceipt;
+        }
+        String replayed = replayForRevertReason(record, receipt);
+        return (replayed != null && !replayed.isBlank())
+                ? replayed
+                : "上链执行 Revert（receipt.status=0x0，节点未提供具体原因）";
+    }
+
+    /**
+     * 用 {@code eth_call} 重放原交易取 revert 原因：按 (from, to, data, gas, gasPrice, value) 逐字段复现，
+     * 并在<b>本交易所在块的前一块</b>状态上执行
+     * <p>
+     * 为何是 {@code blockNumber - 1}：{@code eth_call} 是在“该块应用完之后”的状态上跑，若直接在本交易
+     * 所在块上重放，它已被执行过一遍（余额已扣、状态已变），算出的就不是当时那次失败的原因
+     * <p>
+     * 全链只读，失败（历史状态被裁、节点不支持块参数、重放竟通过）一律返回 null 由调用方退通用文案
+     */
+    private String replayForRevertReason(WithdrawRecord record, TransactionReceipt receipt) {
+        BigInteger minedBlock = receipt.getBlockNumber();
+        if (minedBlock == null || minedBlock.signum() <= 0) {
+            return null;
+        }
+        try {
+            // 与首广播同口径重建 calldata：拿不到原始 data 只能重编，而金额/收款人都在本行里存着
+            String data = TransactionSigner.encodeErc20Transfer(record.getContractAddress(),
+                    record.getToAddress(), new BigInteger(record.getRawValue()));
+            // request.Transaction 与已导入的 response.Transaction 同名，此处用全限定名避开冲突
+            org.web3j.protocol.core.methods.request.Transaction call =
+                    org.web3j.protocol.core.methods.request.Transaction.createFunctionCallTransaction(
+                            record.getFromAddress(), null, record.getGasPrice(), record.getGasLimit(),
+                            record.getContractAddress(), BigInteger.ZERO, data);
+            EthCall response = web3j.ethCall(call,
+                    DefaultBlockParameter.valueOf(minedBlock.subtract(BigInteger.ONE))).send();
+            if (!response.isReverted()) {
+                // 重放竟然通过了：后续区块已改变合约状态，本次失败原因无法复现
+                log.debug("[withdraw-track] 重放未复现 Revert，退回通用文案 withdrawNo={} block={}",
+                        record.getWithdrawNo(), minedBlock);
+                return null;
+            }
+            return stripExecutionReverted(response.getRevertReason());
+        } catch (Exception e) {
+            log.debug("[withdraw-track] eth_call 重放取 revert 原因失败 withdrawNo={} : {}",
+                    record.getWithdrawNo(), e.getMessage());
+            return null;
+        }
+    }
+
+    /** 去掉节点错误对象里的通用前缀 {@code execution reverted:}，只留合约 require 的原因文本 */
+    private String stripExecutionReverted(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String trimmed = raw.trim();
+        return trimmed.toLowerCase().startsWith(PREFIX_EXECUTION_REVERTED + ":")
+                ? trimmed.substring(PREFIX_EXECUTION_REVERTED.length() + 1).trim()
+                : trimmed;
     }
 
     /** 取链最新高度，失败返回 null（追踪场景重跑一轮比多等退避便宜，不抛断整轮） */

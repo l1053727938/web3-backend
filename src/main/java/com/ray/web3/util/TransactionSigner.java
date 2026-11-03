@@ -80,6 +80,21 @@ public final class TransactionSigner {
     }
 
     /**
+     * 组装撤销用的空交易（Day 5-7）：发给自己、{@code value=0}、{@code data} 为空
+     * <p>
+     * 原理：节点只按 {@code (from, nonce)} 认定交易身份，不看内容——同 Nonce 的这笔空交易一旦进了内存池，
+     * 原提币交易就被覆盖作废。它自己会执行成功（原生转账恒耗 21000 gas），但<b>不转移任何资产</b>，
+     * 因此可安全用作“让这笔提币彻底不再发生”的手段（资金侧解冻/退款属业务编排，第 8 周）
+     *
+     * @param self 热钱包自身地址，同时作为 from 与 to
+     */
+    public static RawTransaction buildEmptyTransfer(BigInteger nonce, BigInteger gasPrice, BigInteger gasLimit,
+                                                   String self) {
+        return RawTransaction.createTransaction(
+                nonce, gasPrice, gasLimit, self, BigInteger.ZERO, "");
+    }
+
+    /**
      * 本地离线签名：RawTransaction + 私钥 + 链 ID → EIP-155 签名的裸交易 hex（0x 前缀），
      * 输出即可直接喂给 eth_sendRawTransaction
      */

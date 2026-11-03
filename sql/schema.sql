@@ -117,13 +117,17 @@ CREATE TABLE IF NOT EXISTS withdraw_record
     raw_value       VARCHAR(78)  NOT NULL COMMENT '提币金额（最小单位整数字符串，容纳 uint256 全量）',
     nonce           BIGINT       NOT NULL COMMENT '本笔交易占用的 Nonce（卡住替换/结果不确定判定的锚点）',
     gas_limit       BIGINT       NOT NULL COMMENT '估算并加安全垫后的 gas 上限',
-    gas_price       BIGINT       NOT NULL COMMENT '广播时使用的 gas 单价（wei）',
-    transaction_hash VARCHAR(80)         DEFAULT NULL COMMENT '广播成功后的交易哈希',
-    status          VARCHAR(24)  NOT NULL DEFAULT 'INIT' COMMENT '状态：INIT=已落库未广播，BROADCAST=已广播待确认，SUCCESS/FAILED=Day3-4 追踪回填，REPLACED=被加速交易覆盖',
-    error_message   VARCHAR(512)          DEFAULT NULL COMMENT '失败/拒绝原因（估算 revert、节点拒接等）',
+    gas_price       BIGINT       NOT NULL COMMENT '广播时使用的 gas 单价（wei），加速后为最新一笔的提价值',
+    accelerate_count INT         NOT NULL DEFAULT 0 COMMENT '已提价重播次数（Day 5-7 RBF 加速计数，达上限即停止自动加速转人工）',
+    transaction_hash VARCHAR(80)         DEFAULT NULL COMMENT '当前生效的交易哈希（加速重播后被同 Nonce 的新交易哈希原地替换）',
+    status          VARCHAR(24)  NOT NULL DEFAULT 'INIT' COMMENT '状态：INIT=已落库未广播，BROADCAST=已广播待确认，SUCCESS/FAILED=Day3-4 追踪回填，REPLACED=被加速/撤销交易覆盖作废',
+    error_message   VARCHAR(512)          DEFAULT NULL COMMENT '失败/拒绝原因（估算 revert、节点拒接、卡单标注等）',
     updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     UNIQUE KEY uk_withdraw_no (withdraw_no),
     UNIQUE KEY uk_chain_wallet_nonce (chain_id, from_address, nonce),
     KEY idx_status (status, updated_at)
-) ENGINE = InnoDB COMMENT ='提币交易记录（构造→签名→广播→追踪）';
+) ENGINE = InnoDB COMMENT ='提币交易记录（构造→签名→广播→追踪→加速）';
+
+-- ⚠ 本表用 CREATE TABLE IF NOT EXISTS，对已存在的库不会补列；Day 5-7 新增 accelerate_count，
+--   旧库需手工执行一次：ALTER TABLE withdraw_record ADD COLUMN accelerate_count INT NOT NULL DEFAULT 0 COMMENT '已提价重播次数' AFTER gas_price;

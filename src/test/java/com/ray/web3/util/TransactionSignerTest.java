@@ -8,6 +8,7 @@ import org.web3j.crypto.RawTransaction;
 import java.math.BigInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -68,5 +69,32 @@ class TransactionSignerTest {
         // ECDSA + RFC 6979 确定性签名：同一交易同一密钥两次签名结果必须一致
         assertEquals(first, second);
         assertTrue(first.startsWith("0x"));
+    }
+
+    @Test
+    void buildEmptyTransferCarriesNoValueAndDiffersFromErc20OnSameNonce() {
+        Credentials creds = TransactionSigner.credentialsOf(ANVIL_PK_0);
+        BigInteger nonce = BigInteger.valueOf(7L);
+        BigInteger gasPrice = BigInteger.valueOf(2_000_000_000L);
+        BigInteger gasLimit = BigInteger.valueOf(21_000L);
+
+        RawTransaction empty = TransactionSigner.buildEmptyTransfer(nonce, gasPrice, gasLimit, ANVIL_ADDR_0);
+        // 空交易本质：value=0 + data 为空 + 收款人是自己（同 nonce 才能顶掉原交易，不转资产才不会多提一笔）
+        assertEquals(BigInteger.ZERO, empty.getValue());
+        assertEquals(ANVIL_ADDR_0, empty.getTo());
+        assertEquals("", empty.getData());
+        assertEquals(nonce, empty.getNonce());
+
+        String emptyHex = TransactionSigner.sign(empty, CHAIN_ID, creds);
+        assertEquals(emptyHex, TransactionSigner.sign(
+                TransactionSigner.buildEmptyTransfer(nonce, gasPrice, gasLimit, ANVIL_ADDR_0), CHAIN_ID, creds));
+
+        // 同 nonce/同价但带 transfer calldata 的提币交易必须签出不同结果，且长度更大：
+        // 替换交易靠的就是“同 nonce + 不同内容”让节点认作两笔
+        RawTransaction erc20 = TransactionSigner.buildErc20Transfer(nonce, gasPrice, gasLimit,
+                ANVIL_ADDR_0, TransactionSigner.encodeErc20Transfer(ANVIL_ADDR_0, ANVIL_ADDR_0, BigInteger.ONE));
+        String erc20Hex = TransactionSigner.sign(erc20, CHAIN_ID, creds);
+        assertNotEquals(emptyHex, erc20Hex);
+        assertTrue(emptyHex.length() < erc20Hex.length(), "空交易 data 为空，RLP 长度必然小于带 68 字节 calldata 的转账");
     }
 }

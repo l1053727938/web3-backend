@@ -62,6 +62,39 @@ public class WithdrawProperties {
      * 年龄从 {@code created_at} 算（{@code updated_at} 已被追踪心跳占用，不再代表状态变更时间）；
      * 取值应按链的出块间隔换算：本值默认 600000（10 分钟）≈ 以太坊 PoS 50 个块，远大于正常打包等待，
      * 宁可偏大误报（只写标注、不改状态），也不要在交易只是慢而未卡时过早标记；3s 出块的链可相应调小
+     * <p>
+     * 本值同时是 Day 5-7 自动加速的卡单门槛（共用一个定义，避免“已标卡单”与“已加速”两套年龄口径飘移）
      */
     private long trackStuckTimeoutMs = 600000L;
+
+    // ===== Day 5-7：卡单加速（Replace-by-fee）与撤销覆盖 =====
+
+    /** 自动加速开关：关闭时只标注卡单不提价重播（仍可人工调加速/撤销接口），与追踪开关解耦便于单独灰度 */
+    private boolean accelerateEnabled = true;
+
+    /**
+     * 加速扫描间隔(ms)：刻意大于追踪间隔（默认 15s）——每轮最多提价一次，过于密集会把
+     * {@code accelerate-max-count} 的预算在几分钟内烧完，反而比人工处置更早抵达上限
+     */
+    private long accelerateIntervalMs = 60000L;
+
+    /** 单轮最多处理多少笔卡单：限批防大量重签广播打爆 RPC 配额，也限制同时提价的交易笔数 */
+    private int accelerateBatchSize = 20;
+
+    /**
+     * 提价幅度（千分比）：新价 = 原价 × (1000+bump)/1000 向上取整。
+     * 节点对替换交易有最低加价门槛（geth 默认 10%、OpenEthereum 12.5%），不达标会被
+     * "replacement transaction underpriced" 直接拒接；默认 125=12.5%，取两家默认的较大值
+     */
+    private long accelerateBumpBps = 125L;
+
+    /** 单笔最多加速次数：达上限即停止自动加速并标注交人工，防无限提价烧穿热钱包 ETH */
+    private int accelerateMaxCount = 3;
+
+    /**
+     * 加速后的 gas 单价封顶(wei)：候选价超过本值就放弃自动加速（宁可不推也不冒单笔天价 gas 费的风险）。
+     * 默认 200000000000 = 200 gwei，配合 max-gas-limit 50 万相乘即单笔最贵 0.1 ETH；
+     * 主网/不同链需按实际 gas 水线调整（BSC 约 1 gwei、以太坊主网拥堵时数十 gwei）
+     */
+    private BigInteger accelerateMaxGasPrice = new BigInteger("200000000000");
 }
