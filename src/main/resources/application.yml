@@ -8,7 +8,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:web3_backend}?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true
     username: ${MYSQL_USERNAME:root}
-    password: ${MYSQL_PASSWORD:root123}
+    password: ${MYSQL_PASSWORD:root}
     hikari:
       maximum-pool-size: 20
       minimum-idle: 5
@@ -140,7 +140,7 @@ web3:
     # 追踪开关：关闭时只广播不自动推进终态（仍可手动 GET /api/chain/withdraw/{withdrawNo} 观测）
     track-enabled: ${WEB3_WITHDRAW_TRACK_ENABLED:true}
     # 轮询间隔(ms)：交易从广播到回填终态的最大延迟量级
-    track-interval-ms: ${WEB3_WITHDRAW_TRACK_INTERVAL_MS:15000}
+    track-interval-ms: ${WEB3_WITHDRAW_TRACK_INTERVAL_MS:60000}
     # 单轮最多扫描笔数：限批防一次性向节点发大量收据查询打爆 RPC 配额
     track-batch-size: ${WEB3_WITHDRAW_TRACK_BATCH_SIZE:100}
     # 成功所需确认数：0=收据 status=0x1 即成功；>0 需 (链高-收据块高+1)≥此值，防区块重组误判（同充值侧口径）
@@ -158,7 +158,7 @@ web3:
     # 提价幅度(千分比)：新价=原价×(1000+bump)/1000 向上取整；节点对替换交易有最低加价要求（geth 10%、OpenEthereum 12.5%）
     accelerate-bump-bps: ${WEB3_WITHDRAW_ACCELERATE_BUMP_BPS:125}
     # 单笔最多加速次数：达上限即停止自动并标注转人工（防无限提价烧穿热钱包 ETH）
-    accelerate-max-count: ${WEB3_WITHDRAW_ACCELERATE_MAX_COUNT:3}
+    accelerate-max-count: ${WEB3_WITHDRAW_ACCELERATE_MAX_COUNT:5}
     # 加速后 gas 单价封顶(wei)：候选价超本值就放弃自动加速，默认 200 gwei（×max-gas-limit 即单笔最贵 0.1 ETH）
     accelerate-max-gas-price: ${WEB3_WITHDRAW_ACCELERATE_MAX_GAS_PRICE:200000000000}
 
