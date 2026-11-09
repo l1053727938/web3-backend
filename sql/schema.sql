@@ -151,6 +151,8 @@ CREATE TABLE `account` (
                            KEY `idx_user_type` (`user_id`, `account_type`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   COMMENT='账户余额表（复式账本的余额物化）';
+ALTER TABLE `account`
+    ADD CONSTRAINT `chk_total_balance` CHECK (`total` = `available` + `frozen`);
 
 -- 划转单：一次账户间划转 = 一行
 CREATE TABLE `account_transfer` (
