@@ -131,3 +131,63 @@ CREATE TABLE IF NOT EXISTS withdraw_record
 
 -- ⚠ 本表用 CREATE TABLE IF NOT EXISTS，对已存在的库不会补列；Day 5-7 新增 accelerate_count，
 --   旧库需手工执行一次：ALTER TABLE withdraw_record ADD COLUMN accelerate_count INT NOT NULL DEFAULT 0 COMMENT '已提价重播次数' AFTER gas_price;
+
+-- V1__account.sql
+-- 账户余额表：一个用户 × 一个账户类型 × 一个币种 = 一行
+CREATE TABLE `account` (
+                           `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+                           `user_id`       BIGINT UNSIGNED NOT NULL                COMMENT '用户ID',
+                           `account_type`  VARCHAR(16)     NOT NULL                COMMENT '账户类型: FUND/SPOT/PERP',
+                           `currency`      VARCHAR(16)     NOT NULL                COMMENT '币种符号: USDT/ETH/BTC',
+                           `available`     DECIMAL(38,18)  NOT NULL DEFAULT 0      COMMENT '可用余额',
+                           `frozen`        DECIMAL(38,18)  NOT NULL DEFAULT 0      COMMENT '冻结余额',
+                           `total`         DECIMAL(38,18)  GENERATED ALWAYS AS (`available` + `frozen`) STORED
+                                                          COMMENT '总额=可用+冻结，生成列，应用不可写',
+                           `version`       BIGINT UNSIGNED NOT NULL DEFAULT 0      COMMENT '乐观锁版本号，CAS 用',
+                           `created_at`    DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                           `updated_at`    DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+                           PRIMARY KEY (`id`),
+                           UNIQUE KEY `uk_user_type_currency` (`user_id`, `account_type`, `currency`),
+                           KEY `idx_user_type` (`user_id`, `account_type`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  COMMENT='账户余额表（复式账本的余额物化）';
+
+-- 划转单：一次账户间划转 = 一行
+CREATE TABLE `account_transfer` (
+                                    `id`               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                                    `transfer_no`      VARCHAR(64)     NOT NULL                COMMENT '业务单号，幂等键',
+                                    `from_account_id`  BIGINT UNSIGNED NOT NULL                COMMENT '转出账户ID',
+                                    `to_account_id`    BIGINT UNSIGNED NOT NULL                COMMENT '转入账户ID',
+                                    `currency`         VARCHAR(16)     NOT NULL                COMMENT '币种',
+                                    `amount`           DECIMAL(38,18)  NOT NULL                COMMENT '划转金额',
+                                    `status`           VARCHAR(16)     NOT NULL DEFAULT 'INIT' COMMENT 'INIT/SUCCESS/FAILED',
+                                    `created_at`       DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                                    `updated_at`       DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+                                    PRIMARY KEY (`id`),
+                                    UNIQUE KEY `uk_transfer_no` (`transfer_no`),
+                                    KEY `idx_from_account` (`from_account_id`),
+                                    KEY `idx_to_account` (`to_account_id`),
+                                    KEY `idx_status_created` (`status`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  COMMENT='账户间划转单，业务事实层，配合 ledger_entry/ledger_posting 使用';
+
+
+-- 合约持仓：一个用户 × 一个 symbol × 一个方向 × 一个保证金模式 = 一行
+CREATE TABLE `perp_position` (
+                                 `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                                 `user_id`       BIGINT UNSIGNED NOT NULL                COMMENT '用户ID',
+                                 `symbol`        VARCHAR(32)     NOT NULL                COMMENT '交易对: BTCUSDT',
+                                 `side`          VARCHAR(8)      NOT NULL                COMMENT 'LONG/SHORT',
+                                 `qty`           DECIMAL(38,18)  NOT NULL DEFAULT 0      COMMENT '持仓数量',
+                                 `entry_price`   DECIMAL(38,18)  NOT NULL DEFAULT 0      COMMENT '开仓均价',
+                                 `margin`        DECIMAL(38,18)  NOT NULL DEFAULT 0      COMMENT '占用保证金',
+                                 `margin_mode`   VARCHAR(16)     NOT NULL DEFAULT 'CROSS' COMMENT 'CROSS/ISOLATED',
+                                 `leverage`      DECIMAL(8,2)    NOT NULL DEFAULT 1      COMMENT '杠杆倍数，如 10.00',
+                                 `version`       BIGINT UNSIGNED NOT NULL DEFAULT 0,
+                                 `created_at`    DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                                 `updated_at`    DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+                                 PRIMARY KEY (`id`),
+                                 UNIQUE KEY `uk_user_symbol_side_mode` (`user_id`, `symbol`, `side`, `margin_mode`),
+                                 KEY `idx_user_symbol` (`user_id`, `symbol`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  COMMENT='合约持仓表，独立于 account 余额表（持仓有方向/杠杆/保证金模式，塞进余额表会废掉聚合查询）';
