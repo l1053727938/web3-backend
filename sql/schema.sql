@@ -193,3 +193,31 @@ CREATE TABLE `perp_position` (
                                  KEY `idx_user_symbol` (`user_id`, `symbol`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   COMMENT='合约持仓表，独立于 account 余额表（持仓有方向/杠杆/保证金模式，塞进余额表会废掉聚合查询）';
+
+-- ledger_entry：分录组
+CREATE TABLE `ledger_entry` (
+  `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `entry_no`    VARCHAR(64)     NOT NULL                COMMENT '账本单号，全局唯一',
+  `biz_type`    VARCHAR(32)     NOT NULL                COMMENT '业务类型: DEPOSIT/TRANSFER/FREEZE/FEE/REVERSE',
+  `biz_no`      VARCHAR(128)    NOT NULL                COMMENT '业务单号，与 biz_type 联合幂等',
+  `status`      VARCHAR(16)     NOT NULL DEFAULT 'SUCCESS' COMMENT 'SUCCESS/REVERSED',
+  `created_at`  DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_entry_no` (`entry_no`),
+  UNIQUE KEY `uk_biz` (`biz_type`, `biz_no`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分录组：一笔业务一行，幂等键在组上';
+
+-- ledger_posting：分录明细
+CREATE TABLE `ledger_posting` (
+  `id`             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `entry_id`       BIGINT UNSIGNED NOT NULL                COMMENT '所属分录组',
+  `account_id`     BIGINT UNSIGNED NOT NULL                COMMENT '账户ID，重建余额的分组键',
+  `direction`      VARCHAR(8)      NOT NULL                COMMENT 'DEBIT/CREDIT',
+  `amount`         DECIMAL(38,18)  NOT NULL                COMMENT '金额，永远正数',
+  `currency`       VARCHAR(16)     NOT NULL                COMMENT '币种',
+  `balance_after`  DECIMAL(38,18)  NOT NULL                COMMENT '本笔操作后该子账余额，审计用',
+  `created_at`     DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`),
+  KEY `idx_entry` (`entry_id`),
+  KEY `idx_account_created` (`account_id`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分录明细：一个账户一行，条数不定';
