@@ -1,4 +1,4 @@
-package com.ray.web3.model;
+package com.ray.web3.consts;
 
 import java.math.BigInteger;
 

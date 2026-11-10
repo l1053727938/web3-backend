@@ -4,7 +4,7 @@ import com.ray.web3.config.DepositProperties;
 import com.ray.web3.config.InfuraProperties;
 import com.ray.web3.consts.DbConsts;
 import com.ray.web3.mapper.DepositRecordMapper;
-import com.ray.web3.model.DepositConsts;
+import com.ray.web3.consts.DepositConsts;
 import com.ray.web3.model.dto.TransferEventDTO;
 import com.ray.web3.model.entity.DepositRecord;
 import com.ray.web3.model.entity.DepositWallet;

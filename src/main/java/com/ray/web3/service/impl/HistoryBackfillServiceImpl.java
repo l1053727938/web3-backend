@@ -3,7 +3,7 @@ package com.ray.web3.service.impl;
 import com.ray.web3.config.BackfillProperties;
 import com.ray.web3.config.InfuraProperties;
 import com.ray.web3.mapper.TransferEventLogMapper;
-import com.ray.web3.model.DepositConsts;
+import com.ray.web3.consts.DepositConsts;
 import com.ray.web3.model.dto.TransferEventDTO;
 import com.ray.web3.model.vo.BackfillResultVO;
 import com.ray.web3.service.DepositRoutingService;

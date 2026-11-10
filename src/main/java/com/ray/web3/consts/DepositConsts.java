@@ -1,4 +1,4 @@
-package com.ray.web3.model;
+package com.ray.web3.consts;
 
 /**
  * 充值业务常量（REQ-BIZ-04 模块四）

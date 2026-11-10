@@ -2,7 +2,7 @@ package com.ray.web3.service.impl;
 
 import com.ray.web3.config.WithdrawProperties;
 import com.ray.web3.mapper.WithdrawRecordMapper;
-import com.ray.web3.model.WithdrawConsts;
+import com.ray.web3.consts.WithdrawConsts;
 import com.ray.web3.model.entity.WithdrawRecord;
 import com.ray.web3.service.NonceManagerService;
 import com.ray.web3.service.WithdrawTrackingService;

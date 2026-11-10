@@ -36,7 +36,7 @@ public class WithdrawAccelerateScanner {
     private final RedissonClient redissonClient;
     private final WithdrawProperties withdrawProperties;
 
-    @Scheduled(fixedDelayString = "${web3.withdraw.accelerate-interval-ms:60000}")
+//    @Scheduled(fixedDelayString = "${web3.withdraw.accelerate-interval-ms:60000}")
     public void accelerateByScheduler() {
         doAccelerate("spring-scheduler");
     }

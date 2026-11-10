@@ -2,7 +2,7 @@ package com.ray.web3.listener;
 
 import com.ray.web3.config.WebSocketProperties;
 import com.ray.web3.config.WebSocketServiceFactory;
-import com.ray.web3.model.DepositConsts;
+import com.ray.web3.consts.DepositConsts;
 import com.ray.web3.model.dto.TransferEventDTO;
 import com.ray.web3.service.DepositRoutingService;
 import com.ray.web3.service.TokenMetadataService;
@@ -19,7 +19,6 @@ import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 import org.web3j.protocol.Web3j;
-import org.web3j.protocol.core.DefaultBlockParameter;
 import org.web3j.protocol.core.DefaultBlockParameterName;
 import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.Log;
@@ -30,7 +29,6 @@ import org.web3j.utils.Numeric;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Executors;

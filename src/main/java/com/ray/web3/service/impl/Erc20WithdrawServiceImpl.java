@@ -4,7 +4,7 @@ import com.ray.web3.config.InfuraProperties;
 import com.ray.web3.config.WithdrawProperties;
 import com.ray.web3.consts.PatternConsts;
 import com.ray.web3.mapper.WithdrawRecordMapper;
-import com.ray.web3.model.WithdrawConsts;
+import com.ray.web3.consts.WithdrawConsts;
 import com.ray.web3.model.entity.WithdrawRecord;
 import com.ray.web3.service.Erc20WithdrawService;
 import com.ray.web3.service.GasEstimateService;

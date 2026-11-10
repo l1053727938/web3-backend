@@ -40,7 +40,7 @@ public class WithdrawStatusTracker {
     private final RedissonClient redissonClient;
     private final WithdrawProperties withdrawProperties;
 
-    @Scheduled(fixedDelayString = "${web3.withdraw.track-interval-ms:15000}")
+//    @Scheduled(fixedDelayString = "${web3.withdraw.track-interval-ms:15000}")
     public void trackByScheduler() {
         doTrack("spring-scheduler");
     }
