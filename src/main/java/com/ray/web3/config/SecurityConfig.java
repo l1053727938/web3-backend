@@ -26,8 +26,11 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 @EnableConfigurationProperties(AuthProperties.class)
 public class SecurityConfig {
 
-    /** 链上查询类接口统一前缀：JWT 拦截范围 */
-    private static final String[] PROTECTED_PATHS = {"/api/chain/**"};
+    /**
+     * JWT 拦截范围：链上查询类 + 账本写入。
+     * 账本写接口是花钱动作，必须和提币提交同级鉴权，不能因为它“只是内部接口”就裸露
+     */
+    private static final String[] PROTECTED_PATHS = {"/api/chain/**", "/api/ledger/**"};
 
     /** 入口限流范围：eth_getLogs 类高配额消耗接口（分页拉取、解码拉取、补拉）+ 提币花钱类（防并发重复提交） */
     private static final String[] RATE_LIMITED_PATHS = {

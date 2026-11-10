@@ -115,12 +115,17 @@ public final class JwtTokenProvider {
 
     /**
      * 按请求路径 + HTTP 方法推导所需权限：
-     * 提币提交（POST /api/chain/withdraw/**）→ withdraw:submit（花钱操作独立 scope，只读 token 无法发提币）；
-     * 提币查询 → withdraw:read；日志/补拉/游标类 → log:query；充值地址类 → deposit:read；其余链上查询 → chain:read
+     * 提币提交（POST /api/chain/withdraw/**）→ 写 scope（花钱操作独立 scope，只读 token 无法发提币）；
+     * 提币查询 → withdraw:read；账本写入 → ledger:write、账本查询 → ledger:read；
+     * 日志/补拉/游标类 → log:query；充值地址类 → deposit:read；其余链上查询 → chain:read
      */
     public static String requiredScope(String httpMethod, String path) {
         if (path.startsWith("/api/chain/withdraw")) {
             return "POST".equalsIgnoreCase(httpMethod) ? "test" : "withdraw:read";
+        }
+        // 账本写入与只读分开授权：能查余额的 token 不能顺手记账
+        if (path.startsWith("/api/ledger")) {
+            return "POST".equalsIgnoreCase(httpMethod) ? "ledger:write" : "ledger:read";
         }
         if (path.startsWith("/api/chain/logs") || path.contains("/backfill") || path.contains("/cursor")) {
             return "log:query";

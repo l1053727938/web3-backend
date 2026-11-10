@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS withdraw_record
 
 -- V1__account.sql
 -- 账户余额表：一个用户 × 一个账户类型 × 一个币种 = 一行
-CREATE TABLE `account` (
+CREATE TABLE IF NOT EXISTS `account` (
                            `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
                            `user_id`       BIGINT UNSIGNED NOT NULL                COMMENT '用户ID',
                            `account_type`  VARCHAR(16)     NOT NULL                COMMENT '账户类型: FUND/SPOT/PERP',
@@ -155,7 +155,7 @@ ALTER TABLE `account`
     ADD CONSTRAINT `chk_total_balance` CHECK (`total` = `available` + `frozen`);
 
 -- 划转单：一次账户间划转 = 一行
-CREATE TABLE `account_transfer` (
+CREATE TABLE IF NOT EXISTS `account_transfer` (
                                     `id`               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                                     `transfer_no`      VARCHAR(64)     NOT NULL                COMMENT '业务单号，幂等键',
                                     `from_account_id`  BIGINT UNSIGNED NOT NULL                COMMENT '转出账户ID',
@@ -175,7 +175,7 @@ CREATE TABLE `account_transfer` (
 
 
 -- 合约持仓：一个用户 × 一个 symbol × 一个方向 × 一个保证金模式 = 一行
-CREATE TABLE `perp_position` (
+CREATE TABLE IF NOT EXISTS `perp_position` (
                                  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                                  `user_id`       BIGINT UNSIGNED NOT NULL                COMMENT '用户ID',
                                  `symbol`        VARCHAR(32)     NOT NULL                COMMENT '交易对: BTCUSDT',
@@ -193,14 +193,14 @@ CREATE TABLE `perp_position` (
                                  KEY `idx_user_symbol` (`user_id`, `symbol`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   COMMENT='合约持仓表，独立于 account 余额表（持仓有方向/杠杆/保证金模式，塞进余额表会废掉聚合查询）';
-
 -- ledger_entry：分录组
-CREATE TABLE `ledger_entry` (
+CREATE TABLE IF NOT EXISTS `ledger_entry` (
   `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `entry_no`    VARCHAR(64)     NOT NULL                COMMENT '账本单号，全局唯一',
   `biz_type`    VARCHAR(32)     NOT NULL                COMMENT '业务类型: DEPOSIT/TRANSFER/FREEZE/FEE/REVERSE',
   `biz_no`      VARCHAR(128)    NOT NULL                COMMENT '业务单号，与 biz_type 联合幂等',
   `status`      VARCHAR(16)     NOT NULL DEFAULT 'SUCCESS' COMMENT 'SUCCESS/REVERSED',
+  `reverse_of` BIGINT UNSIGNED NULL COMMENT '冲正时指向原 entry_id，原分录不改',
   `created_at`  DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_entry_no` (`entry_no`),
@@ -208,11 +208,12 @@ CREATE TABLE `ledger_entry` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分录组：一笔业务一行，幂等键在组上';
 
 -- ledger_posting：分录明细
-CREATE TABLE `ledger_posting` (
+CREATE TABLE IF NOT EXISTS `ledger_posting` (
   `id`             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `entry_id`       BIGINT UNSIGNED NOT NULL                COMMENT '所属分录组',
   `account_id`     BIGINT UNSIGNED NOT NULL                COMMENT '账户ID，重建余额的分组键',
-  `direction`      VARCHAR(8)      NOT NULL                COMMENT 'DEBIT/CREDIT',
+  `direction`      VARCHAR(8)      NOT NULL                COMMENT 'DEBIT/CREDIT，CREDIT=余额增加、DEBIT=余额减少',
+  `balance_type`   VARCHAR(16)     NOT NULL DEFAULT 'AVAILABLE' COMMENT 'AVAILABLE/FROZEN，指明本次变动的是哪个子账',
   `amount`         DECIMAL(38,18)  NOT NULL                COMMENT '金额，永远正数',
   `currency`       VARCHAR(16)     NOT NULL                COMMENT '币种',
   `balance_after`  DECIMAL(38,18)  NOT NULL                COMMENT '本笔操作后该子账余额，审计用',
@@ -221,3 +222,8 @@ CREATE TABLE `ledger_posting` (
   KEY `idx_entry` (`entry_id`),
   KEY `idx_account_created` (`account_id`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分录明细：一个账户一行，条数不定';
+
+-- ⚠ 同 withdraw_record：本脚本用 CREATE TABLE IF NOT EXISTS，对已存在的库不会补列。
+--   若 ledger_posting 已按旧版建过表，需手工执行一次：
+--   ALTER TABLE ledger_posting ADD COLUMN balance_type VARCHAR(16) NOT NULL DEFAULT 'AVAILABLE'
+--       COMMENT 'AVAILABLE/FROZEN，指明本次变动的是哪个子账' AFTER direction;
