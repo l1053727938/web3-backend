@@ -1,6 +1,5 @@
-package com.ray.web3.mapper;
+package com.ray.web3.ledger.mapper;
 
-import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.ray.web3.model.entity.LedgerPosting;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Param;
@@ -13,8 +12,13 @@ import java.util.List;
  * <p>
  * 一组分录的明细条数不定（2 条、4 条甚至更多），逐条 insert 会多出 N 次网络往返；
  * 这里用单条多值 INSERT 一次落库，仍与分录组在同一个事务里。
+ * <p>
+ * 同 {@link LedgerEntryMapper}：<b>不继承 BaseMapper</b>，接口上没有 update/delete，
+ * 账本明细只能追加，不能被改写。
+ * <p>
+ * 本包由 {@code LedgerDataSourceConfig} 扫描，走账本专属连接池。
  */
-public interface LedgerPostingMapper extends BaseMapper<LedgerPosting> {
+public interface LedgerPostingMapper {
 
     /**
      * 批量写入分录明细；调用方须保证 list 非空（分录组至少两条 posting）

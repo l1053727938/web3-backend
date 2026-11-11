@@ -2,9 +2,9 @@ package com.ray.web3.service.impl;
 
 import com.ray.web3.exception.LedgerPostingException;
 import com.ray.web3.exception.UnbalancedLedgerException;
-import com.ray.web3.mapper.AccountMapper;
-import com.ray.web3.mapper.LedgerEntryMapper;
-import com.ray.web3.mapper.LedgerPostingMapper;
+import com.ray.web3.ledger.mapper.AccountMapper;
+import com.ray.web3.ledger.mapper.LedgerEntryMapper;
+import com.ray.web3.ledger.mapper.LedgerPostingMapper;
 import com.ray.web3.consts.LedgerConsts;
 import com.ray.web3.model.entity.Account;
 import com.ray.web3.model.entity.LedgerEntry;
@@ -189,6 +189,101 @@ class LedgerServiceImplTest {
 
         verify(ledgerPostingMapper, never()).insertBatch(anyList());
         verify(accountMapper, never()).updateBalance(any(), any(), any(), any());
+    }
+
+    @Test
+    void 冲正_写入方向相反的分录并指向原分录() {
+        LedgerEntry original = new LedgerEntry();
+        original.setId(7L);
+        original.setEntryNo("LE7");
+        original.setBizType(LedgerConsts.BizType.FREEZE);
+        original.setBizNo("ORD-1");
+
+        when(ledgerEntryMapper.selectByBiz(LedgerConsts.BizType.FREEZE, "ORD-1")).thenReturn(original);
+        when(ledgerPostingMapper.selectByEntryId(7L)).thenReturn(List.of(
+                postingRow(11L, "DEBIT", "30", "AVAILABLE"),
+                postingRow(11L, "CREDIT", "30", "FROZEN")));
+        when(accountMapper.selectByIdForUpdate(11L)).thenReturn(account(11L, "100", "30", 2L));
+        when(ledgerEntryMapper.insert(any(LedgerEntry.class))).thenAnswer(invocation -> {
+            invocation.getArgument(0, LedgerEntry.class).setId(9L);
+            return 1;
+        });
+        when(ledgerPostingMapper.insertBatch(anyList())).thenReturn(2);
+        when(accountMapper.updateBalance(any(), any(), any(), any())).thenReturn(1);
+
+        LedgerEntry reversal = service.reverse(LedgerConsts.BizType.FREEZE, "ORD-1");
+
+        assertThat(reversal.getBizType()).isEqualTo(LedgerConsts.BizType.REVERSE);
+        assertThat(reversal.getBizNo()).isEqualTo("REV:LE7");
+        assertThat(reversal.getReverseOf()).isEqualTo(7L);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<LedgerPosting>> rowsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(ledgerPostingMapper).insertBatch(rowsCaptor.capture());
+        List<LedgerPosting> rows = rowsCaptor.getValue();
+        // 原：AVAILABLE DEBIT 30 / FROZEN CREDIT 30 → 冲正：AVAILABLE CREDIT / FROZEN DEBIT
+        assertThat(rows.get(0).getDirection()).isEqualTo("CREDIT");
+        assertThat(rows.get(0).getBalanceType()).isEqualTo("AVAILABLE");
+        assertThat(rows.get(0).getBalanceAfter()).isEqualByComparingTo("130");
+        assertThat(rows.get(1).getDirection()).isEqualTo("DEBIT");
+        assertThat(rows.get(1).getBalanceType()).isEqualTo("FROZEN");
+        assertThat(rows.get(1).getBalanceAfter()).isEqualByComparingTo("0");
+
+        verify(accountMapper).updateBalance(eq(11L), amount("130"), amount("0"), eq(2L));
+    }
+
+    @Test
+    void 冲正_允许余额扣成负数_平台账户本来就允许负() {
+        LedgerEntry original = new LedgerEntry();
+        original.setId(8L);
+        original.setEntryNo("LE8");
+        original.setBizType(LedgerConsts.BizType.DEPOSIT);
+        original.setBizNo("DEP-1");
+
+        when(ledgerEntryMapper.selectByBiz(LedgerConsts.BizType.DEPOSIT, "DEP-1")).thenReturn(original);
+        when(ledgerPostingMapper.selectByEntryId(8L)).thenReturn(List.of(
+                postingRow(11L, "CREDIT", "100", "AVAILABLE"),
+                postingRow(99L, "DEBIT", "100", "AVAILABLE")));
+
+        // 用户已把 70 提走，只剩 30；冲正 100 后应为 -70 —— 必须放行
+        when(accountMapper.selectByIdForUpdate(11L)).thenReturn(account(11L, "30", "0", 1L));
+        Account platform = account(99L, "-100", "0", 1L);
+        platform.setAccountType(LedgerConsts.AccountType.PLATFORM);
+        when(accountMapper.selectByIdForUpdate(99L)).thenReturn(platform);
+
+        when(ledgerEntryMapper.insert(any(LedgerEntry.class))).thenAnswer(invocation -> {
+            invocation.getArgument(0, LedgerEntry.class).setId(10L);
+            return 1;
+        });
+        when(ledgerPostingMapper.insertBatch(anyList())).thenReturn(2);
+        when(accountMapper.updateBalance(any(), any(), any(), any())).thenReturn(1);
+
+        service.reverse(LedgerConsts.BizType.DEPOSIT, "DEP-1");
+
+        verify(accountMapper).updateBalance(eq(11L), amount("-70"), amount("0"), eq(1L));
+        // 平台负债：-100 + 100 = 0
+        verify(accountMapper).updateBalance(eq(99L), amount("0"), amount("0"), eq(1L));
+    }
+
+    @Test
+    void 冲正_原分录不存在应报错且不落库() {
+        assertThatThrownBy(() -> service.reverse(LedgerConsts.BizType.FREEZE, "NOT-EXIST"))
+                .isInstanceOf(LedgerPostingException.class)
+                .hasMessageContaining("原分录不存在");
+
+        verify(ledgerEntryMapper, never()).insert(any(LedgerEntry.class));
+        verify(ledgerPostingMapper, never()).insertBatch(anyList());
+    }
+
+    private static LedgerPosting postingRow(long accountId, String direction,
+                                            String amount, String balanceType) {
+        LedgerPosting row = new LedgerPosting();
+        row.setAccountId(accountId);
+        row.setDirection(direction);
+        row.setAmount(new BigDecimal(amount));
+        row.setCurrency(USDT);
+        row.setBalanceType(balanceType);
+        return row;
     }
 
     private static Posting posting(long accountId, Direction direction, String amount) {

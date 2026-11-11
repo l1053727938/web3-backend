@@ -21,6 +21,25 @@ spring:
       # 连接最大存活(ms)：小于 MySQL wait_timeout，主动回收防服务端单方面断连；空闲连接超时回收
       max-lifetime: 1800000
       idle-timeout: 600000
+    # ===== 账本连接池（第 2 周）：与业务池同库，但连接池独立 =====
+    # 绑定到 LedgerDataSourceConfig.ledgerDataSource，Hikari 属性名与这里的键一一对应。
+    # 目的：业务侧慢 SQL 占满业务池时，post() 记账仍能拿到连接。
+    # 以后要物理分库，只改 jdbc-url/账号，代码零改动。
+    ledger:
+      jdbc-url: jdbc:mysql://${MYSQL_LEDGER_HOST:${MYSQL_HOST:localhost}}:${MYSQL_LEDGER_PORT:${MYSQL_PORT:3306}}/${MYSQL_LEDGER_DATABASE:${MYSQL_DATABASE:web3_backend}}?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true
+      username: ${MYSQL_LEDGER_USERNAME:${MYSQL_USERNAME:root}}
+      password: ${MYSQL_LEDGER_PASSWORD:${MYSQL_PASSWORD:123456}}
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      pool-name: ledger-pool
+      # 固定上限 10：账本写入是低频重事务，不需要大池；上限小也更早暴露“记账堆积”
+      maximum-pool-size: ${LEDGER_POOL_MAX_SIZE:10}
+      minimum-idle: ${LEDGER_POOL_MIN_IDLE:2}
+      connection-test-query: SELECT 1
+      validation-timeout: 3000
+      # 取连接超时比业务池短：账本宁可快速失败让调用方重试，也不要把请求线程长时间挂住
+      connection-timeout: 5000
+      max-lifetime: 1800000
+      idle-timeout: 600000
   data:
     redis:
       host: ${REDIS_HOST:localhost}

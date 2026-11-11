@@ -35,4 +35,9 @@ public enum Direction {
     public BigDecimal signed(BigDecimal amount) {
         return sign > 0 ? amount : amount.negate();
     }
+
+    /** 反向分录：冲正时把每一条 posting 的加减对调 */
+    public Direction opposite() {
+        return sign > 0 ? DEBIT : CREDIT;
+    }
 }

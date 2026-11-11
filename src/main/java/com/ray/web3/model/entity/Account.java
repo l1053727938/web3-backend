@@ -18,7 +18,7 @@ import java.time.LocalDateTime;
  * {@code total} 是数据库生成列（available + frozen），应用永远不写它，因此这里标 {@code exist = false}
  * 不参与 ORM 的插入与读取。
  * <p>
- * 余额更新必须走 {@link com.ray.web3.mapper.AccountMapper#updateBalance} 的
+ * 余额更新必须走 {@link com.ray.web3.ledger.mapper.AccountMapper#updateBalance} 的
  * {@code version = version + 1 WHERE version = ?} CAS，禁止“读-改-写回”的裸 UPDATE。
  */
 @Data

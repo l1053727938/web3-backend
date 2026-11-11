@@ -1,4 +1,4 @@
-package com.ray.web3.mapper;
+package com.ray.web3.ledger.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.ray.web3.model.entity.Account;
@@ -14,6 +14,10 @@ import java.math.BigDecimal;
  * 余额写入只有一个入口 {@link #updateBalance}：带 {@code version} 的 CAS 更新。
  * 绝不允许出现 {@code UPDATE account SET available = available - ?} 这种盲减——
  * 盲减在并发下会把余额扣成负数，且没有版本号可供对账追溯。
+ * <p>
+ * <b>包位置即连接池归属</b>：本包由 {@code LedgerDataSourceConfig} 的
+ * {@code @MapperScan(sqlSessionFactoryRef = "ledgerSqlSessionFactory")} 扫描，
+ * 走账本专属连接池；业务 Mapper 在 {@code com.ray.web3.mapper}，走业务池。两池互不挤占。
  */
 public interface AccountMapper extends BaseMapper<Account> {
 

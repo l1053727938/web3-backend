@@ -12,11 +12,12 @@ import java.util.List;
  * <p>
  * 作为值对象不可变；{@code postings} 在构造时做防御性拷贝。
  *
- * @param bizType  业务类型，见 {@link LedgerConsts.BizType}
- * @param bizNo    业务单号（充值单号/划转单号/提币单号），与 bizType 联合唯一
- * @param postings 分录明细，至少两条（借贷必相等）
+ * @param bizType   业务类型，见 {@link LedgerConsts.BizType}
+ * @param bizNo     业务单号（充值单号/划转单号/提币单号），与 bizType 联合唯一
+ * @param postings  分录明细，至少两条（借贷必相等）
+ * @param reverseOf 冲正组指向的原 entry_id；普通业务为 null。原分录永远不改，冲正靠这个指针表达
  */
-public record LedgerGroup(String bizType, String bizNo, List<Posting> postings) {
+public record LedgerGroup(String bizType, String bizNo, List<Posting> postings, Long reverseOf) {
 
     public LedgerGroup {
         if (bizType == null || bizType.isBlank()) {
@@ -34,6 +35,14 @@ public record LedgerGroup(String bizType, String bizNo, List<Posting> postings) 
         if (postings == null || postings.size() < 2) {
             throw new IllegalArgumentException("一组分录至少两条 posting（有借必有贷）");
         }
+        if (reverseOf != null && reverseOf <= 0) {
+            throw new IllegalArgumentException("reverseOf 必须是正数: " + reverseOf);
+        }
         postings = List.copyOf(postings);
+    }
+
+    /** 普通业务（非冲正）分录组 */
+    public LedgerGroup(String bizType, String bizNo, List<Posting> postings) {
+        this(bizType, bizNo, postings, null);
     }
 }

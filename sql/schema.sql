@@ -137,7 +137,7 @@ CREATE TABLE IF NOT EXISTS withdraw_record
 CREATE TABLE IF NOT EXISTS `account` (
                            `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
                            `user_id`       BIGINT UNSIGNED NOT NULL                COMMENT '用户ID',
-                           `account_type`  VARCHAR(16)     NOT NULL                COMMENT '账户类型: FUND/SPOT/PERP',
+                           `account_type`  VARCHAR(16)     NOT NULL                COMMENT '账户类型: FUND/SPOT/PERP；PLATFORM=平台账户（代收负债/手续费/待结算，允许负余额）',
                            `currency`      VARCHAR(16)     NOT NULL                COMMENT '币种符号: USDT/ETH/BTC',
                            `available`     DECIMAL(38,18)  NOT NULL DEFAULT 0      COMMENT '可用余额',
                            `frozen`        DECIMAL(38,18)  NOT NULL DEFAULT 0      COMMENT '冻结余额',
@@ -197,14 +197,16 @@ CREATE TABLE IF NOT EXISTS `perp_position` (
 CREATE TABLE IF NOT EXISTS `ledger_entry` (
   `id`          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `entry_no`    VARCHAR(64)     NOT NULL                COMMENT '账本单号，全局唯一',
-  `biz_type`    VARCHAR(32)     NOT NULL                COMMENT '业务类型: DEPOSIT/TRANSFER/FREEZE/FEE/REVERSE',
+  `biz_type`    VARCHAR(32)     NOT NULL                COMMENT '业务类型: DEPOSIT/TRANSFER/FREEZE/UNFREEZE/FEE/REVERSE',
   `biz_no`      VARCHAR(128)    NOT NULL                COMMENT '业务单号，与 biz_type 联合幂等',
   `status`      VARCHAR(16)     NOT NULL DEFAULT 'SUCCESS' COMMENT 'SUCCESS/REVERSED',
   `reverse_of` BIGINT UNSIGNED NULL COMMENT '冲正时指向原 entry_id，原分录不改',
   `created_at`  DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_entry_no` (`entry_no`),
-  UNIQUE KEY `uk_biz` (`biz_type`, `biz_no`)
+  UNIQUE KEY `uk_biz` (`biz_type`, `biz_no`),
+  -- 一条原分录最多被冲正一次：MySQL 唯一索引允许多个 NULL（普通业务行），冲正行 reverse_of 非空
+  UNIQUE KEY `uk_reverse_of` (`reverse_of`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分录组：一笔业务一行，幂等键在组上';
 
 -- ledger_posting：分录明细
@@ -223,7 +225,14 @@ CREATE TABLE IF NOT EXISTS `ledger_posting` (
   KEY `idx_account_created` (`account_id`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分录明细：一个账户一行，条数不定';
 
--- ⚠ 同 withdraw_record：本脚本用 CREATE TABLE IF NOT EXISTS，对已存在的库不会补列。
+-- ⚠ 同 withdraw_record：本脚本用 CREATE TABLE IF NOT EXISTS，对已存在的库不会补列/补索引。
 --   若 ledger_posting 已按旧版建过表，需手工执行一次：
 --   ALTER TABLE ledger_posting ADD COLUMN balance_type VARCHAR(16) NOT NULL DEFAULT 'AVAILABLE'
 --       COMMENT 'AVAILABLE/FROZEN，指明本次变动的是哪个子账' AFTER direction;
+--   若 ledger_entry 未建 uk_reverse_of（Day 5-6 冲正需要），手工执行：
+--   ALTER TABLE ledger_entry ADD UNIQUE KEY uk_reverse_of (reverse_of);
+
+-- 生产库账号权限：账本只增不改（配合代码侧“不提供 update/delete 方法”）
+--   GRANT SELECT, INSERT ON web3_backend.ledger_entry   TO 'ledger_app'@'%';
+--   GRANT SELECT, INSERT ON web3_backend.ledger_posting TO 'ledger_app'@'%';
+--   GRANT SELECT, INSERT, UPDATE ON web3_backend.account TO 'ledger_app'@'%';  -- 仅余额回写，不给 DELETE

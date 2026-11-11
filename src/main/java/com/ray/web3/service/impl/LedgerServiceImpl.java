@@ -2,9 +2,10 @@ package com.ray.web3.service.impl;
 
 import com.ray.web3.exception.LedgerPostingException;
 import com.ray.web3.exception.UnbalancedLedgerException;
-import com.ray.web3.mapper.AccountMapper;
-import com.ray.web3.mapper.LedgerEntryMapper;
-import com.ray.web3.mapper.LedgerPostingMapper;
+import com.ray.web3.ledger.LedgerGroupFactory;
+import com.ray.web3.ledger.mapper.AccountMapper;
+import com.ray.web3.ledger.mapper.LedgerEntryMapper;
+import com.ray.web3.ledger.mapper.LedgerPostingMapper;
 import com.ray.web3.consts.LedgerConsts;
 import com.ray.web3.model.entity.Account;
 import com.ray.web3.model.entity.LedgerEntry;
@@ -48,7 +49,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * 直接返回原 entry 且不再动余额——这是“重复投递”的唯一正确姿势，比在应用层查一次再写更可靠
  * （查与写之间有竞态，唯一键没有）。
  * <p>
- * 未做（留到后续）：账本独立数据源/连接池隔离、冲正 {@code reverse()}、四类业务场景封装。
+ * 连接池隔离：账本 Mapper（{@code com.ray.web3.ledger.mapper}）走 {@code ledgerDataSource}，
+ * 本方法显式绑定 {@code ledgerTransactionManager}，业务池被慢 SQL 占满时记账仍能拿到连接。
+ * <p>
+ * Day 5-6：四类业务分录由 {@link LedgerGroupFactory} 生成（纯函数、可单测），
+ * 冲正通过 {@link #reverse(String, String)} 写一组反向分录并让 {@code reverse_of} 指向原 entry，
+ * 原分录永远不改。冲正是唯一允许子账为负的路径：更正既成事实优先于余额非负约束。
  */
 @Slf4j
 @Service
@@ -80,8 +86,73 @@ public class LedgerServiceImpl implements LedgerService {
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(transactionManager = "ledgerTransactionManager", rollbackFor = Exception.class)
     public LedgerEntry post(LedgerGroup group) {
+        return postInternal(group, false);
+    }
+
+    @Override
+    @Transactional(transactionManager = "ledgerTransactionManager", rollbackFor = Exception.class)
+    public LedgerEntry reverse(String bizType, String bizNo) {
+        LedgerEntry original = ledgerEntryMapper.selectByBiz(bizType, bizNo);
+        if (original == null) {
+            throw new LedgerPostingException("原分录不存在，无法冲正: bizType=" + bizType + ", bizNo=" + bizNo);
+        }
+        if (LedgerConsts.BizType.REVERSE.equals(original.getBizType())) {
+            throw new LedgerPostingException("不允许对冲正分录再次冲正: entryNo=" + original.getEntryNo());
+        }
+        List<LedgerPosting> originalPostings = ledgerPostingMapper.selectByEntryId(original.getId());
+        if (originalPostings == null || originalPostings.isEmpty()) {
+            throw new LedgerPostingException("原分录明细为空，无法冲正: entryNo=" + original.getEntryNo());
+        }
+        LedgerGroup reversal = LedgerGroupFactory.reversal(original, originalPostings);
+        // 冲正允许负余额：原业务事实必须能撤销，负余额交给对账/风控处理
+        return postInternal(reversal, true);
+    }
+
+    @Override
+    @Transactional(transactionManager = "ledgerTransactionManager", rollbackFor = Exception.class)
+    public LedgerEntry deposit(String depositNo, long userAccountId, long platformLiabilityAccountId,
+                               BigDecimal amount, String currency) {
+        return postInternal(LedgerGroupFactory.deposit(
+                depositNo, userAccountId, platformLiabilityAccountId, amount, currency), false);
+    }
+
+    @Override
+    @Transactional(transactionManager = "ledgerTransactionManager", rollbackFor = Exception.class)
+    public LedgerEntry freeze(String orderNo, long userAccountId, BigDecimal amount, String currency) {
+        return postInternal(LedgerGroupFactory.freezeOrder(orderNo, userAccountId, amount, currency), false);
+    }
+
+    @Override
+    @Transactional(transactionManager = "ledgerTransactionManager", rollbackFor = Exception.class)
+    public LedgerEntry unfreeze(String withdrawNo, long userAccountId, BigDecimal amount, String currency) {
+        return postInternal(LedgerGroupFactory.unfreezeWithdraw(
+                withdrawNo, userAccountId, amount, currency), false);
+    }
+
+    @Override
+    @Transactional(transactionManager = "ledgerTransactionManager", rollbackFor = Exception.class)
+    public Settlement settle(String tradeNo, long takerAccountId, long makerAccountId,
+                             long feePayerAccountId, long platformFeeAccountId,
+                             BigDecimal amount, BigDecimal fee, String currency) {
+        // 本金与手续费必须同事务：只落本金不落手续费，平台收入就丢了；只落手续费更无法解释
+        LedgerEntry principal = postInternal(LedgerGroupFactory.settleTrade(
+                tradeNo, takerAccountId, makerAccountId, amount, currency), false);
+        if (fee == null || fee.signum() == 0) {
+            return new Settlement(principal, null);
+        }
+        LedgerEntry feeEntry = postInternal(LedgerGroupFactory.tradeFee(
+                tradeNo, feePayerAccountId, platformFeeAccountId, fee, currency), false);
+        return new Settlement(principal, feeEntry);
+    }
+
+    /**
+     * 记账内核
+     *
+     * @param allowNegative 是否允许子账扣成负数，仅冲正使用；正常业务必须保持余额非负
+     */
+    private LedgerEntry postInternal(LedgerGroup group, boolean allowNegative) {
         Objects.requireNonNull(group, "分录组不能为空");
 
         // ① 借贷平衡：不平直接抛，连 ledger_entry 都不插
@@ -119,7 +190,9 @@ public class LedgerServiceImpl implements LedgerService {
                     id -> currentBalance(account, posting.balanceType()));
 
             BigDecimal after = posting.direction().apply(current, posting.amount());
-            if (after.signum() < 0) {
+            // 平台负债账户（PLATFORM）允许为负：充值落账是“用户 + / 代收负债 -”，
+            // 负债在资产口径下天然越充越负，不能按用户余额的口径拦住
+            if (!allowNegative && !isPlatformAccount(account) && after.signum() < 0) {
                 throw new LedgerPostingException("子账余额不足，拒绝记账: accountId=" + posting.accountId()
                         + ", balanceType=" + posting.balanceType() + ", currency=" + posting.currency()
                         + ", 当前=" + current.toPlainString() + ", 本笔=" + posting.direction()
@@ -202,6 +275,10 @@ public class LedgerServiceImpl implements LedgerService {
         }
     }
 
+    private static boolean isPlatformAccount(Account account) {
+        return LedgerConsts.AccountType.PLATFORM.equalsIgnoreCase(account.getAccountType());
+    }
+
     private static BigDecimal currentBalance(Account account, BalanceType balanceType) {
         BigDecimal raw = balanceType == BalanceType.AVAILABLE ? account.getAvailable() : account.getFrozen();
         return MoneyUtils.normalize(nullToZero(raw));
@@ -221,6 +298,7 @@ public class LedgerServiceImpl implements LedgerService {
                 Math.floorMod(ENTRY_NO_SEQ.getAndIncrement(), 1_000_000)));
         entry.setBizType(group.bizType());
         entry.setBizNo(group.bizNo());
+        entry.setReverseOf(group.reverseOf());
         entry.setStatus(LedgerConsts.EntryStatus.SUCCESS);
         return entry;
     }
