@@ -8,3 +8,4 @@ wallet/
 *.json.backup
 logs/
 .DS_Store
+*/.workbuddy
