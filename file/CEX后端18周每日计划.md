@@ -9,14 +9,14 @@
 > **范围约束（2026-11-05）**：只保留 CEX 后端职责（交易 / 账务 / 资产网关 / 风控 / 工程）。公链协议与智能合约开发类条目（Layer2、ERC-4337 账户抽象、Intent、Foundry 重入复现、Solana、AMM/SWAP）已从正文删除，不属于 CEX 后端开发职责。
 > 已编码的**链上读写不属于"排除项"**：它是资产网关的上游入口，已按周并入整体流程（见下方「链上底座在流程中的位置」），**不重学但必须跑过、必须出现在图与口述里**。
 >
-> **代码盘点（2026-11-09 更新）**：本仓库已完成「链上读写 + 提币网关」，对应下表 5 个 🟡 单元；U1 账本的 W1（分户模型 + 三表 + 金额双轨）已交付，W2 四类分录从 0 开始。详见 `CEX后端完成度对照.md`。
+> **代码盘点（2026-11-12 更新）**：本仓库已完成「链上读写 + 提币网关」，对应下表 5 个 🟡 单元；U1 账本的 W1（分户模型 + 三表 + 金额双轨）与 W2（`post()` + 四场景分录 + 冲正 + 连接池隔离）均已交付。详见 `CEX后端完成度对照.md`。
 
 ### 各周完成度速览（✅ 已完成 / 🟡 部分 / ⬜ 未开始）
 
 | 周 | 单元 | 状态 | 说明 |
 |---|---|---|---|
 | W1 | U1-a 分户模型 + 三表 | ✅ 100% | 三表 DDL + CHECK、MoneyUtils + 4 单测已交付（2026-11-09）；账本服务按计划留到 W2 |
-| W2 | U1-b 四类分录 + 重建 | ⬜ 0% | `post()`、重建、冲正全无 |
+| W2 | U1-b 四类分录 + 重建 | ✅ 100% | `post()` 五步、四场景分录、冲正、重建 SQL、连接池隔离 + 14 单测已交付（2026-11-12）；并发/重建实测待补 |
 | W3 | U2-a outbox + Kafka | 🟡 30% | 已有先落库后发布 + `notify_status` + 幂等键；缺 outbox/Kafka/消费者 |
 | W4 | U2-b 重试 + 对账起头 | 🟡 25% | 已有 FAILED 状态位、RPC 退避 jitter 可迁移、条数对账；缺消费重试/DLQ/lag |
 | W5 | U3 对账与差错处置 | 🟡 15% | 已有 decimals 快照与单号体系；`INIT` 三态规则已设计、代码未写 |
@@ -184,13 +184,25 @@
 
 ---
 
-## 【第 2 周：账户体系与复式账本基座（二）】  ⬜
+## 【第 2 周：账户体系与复式账本基座（二）】  ✅
 
 核心目标：`post()` 能拦住不平的分录；四个业务场景各写出一组平衡分录；**删掉余额表能重建**。
 
-> **状态：⬜ 未开始 · 0%**
-> **可复用**：`INSERT IGNORE` + 唯一键幂等、一页一事务的取舍经验（可平移到分录组幂等）
-> **缺**：`ledger_entry` / `ledger_posting`、`post()`、重建脚本、冲正流程
+> **状态：✅ 已完成 · 100%（2026-11-12）**
+> **已交付**：
+> - 两表 DDL：`ledger_entry`（`uk_biz`、`uk_reverse_of`）+ `ledger_posting`（`balance_type`），落在 `sql/schema.sql`
+> - `LedgerService.post()` 五步（平衡校验 → 升序加锁 → 落分录 → CAS 回写 → 整组回滚）+ 幂等
+> - `LedgerGroupFactory` 四场景分录（充值/冻结/清算/解冻）+ `reverse()` 冲正（`reverse_of`、方向对调、只冲一次）
+> - 账本独立连接池：`ledgerDataSource` / `ledgerTransactionManager`，账本 Mapper 按包路由
+> - 账本 Mapper 不继承 `BaseMapper`（接口上无 update/delete），DB 授权示例写入 `schema.sql`
+> - 单测：`LedgerGroupFactoryTest` 6 个 + `LedgerServiceImplTest` 8 个，共 14 个全绿
+> - 提交：`c89eac2` → `caff8d6` → `6f48509` → `bd3bee9`；文档见 `file/第二阶段/`
+> **与计划的偏差**：
+> - `post()` 返回 `LedgerEntry` 而非 `void`，让调用方能看到幂等命中
+> - “`LedgerEntry` 无 setter”未采用：MyBatis 结果映射需要 setter，改为 Mapper 不暴露写改方法 + DB 权限约束
+> - 新增 `UNFREEZE` 业务类型（解冻不复用 `FREEZE`，避免同单号撞 `uk_biz`）与 `account_type='PLATFORM'`（平台负债允许为负）
+> **遗留验证**：50 线程并发扣同一账户、删表重建 diff 两项已设计，尚未在库上实跑
+> **下一周**：W3 outbox、消费幂等、对账 Job
 
 - **Day 1-2（3h）：[🔴 P1 死磕] 分录模型与"删表可重建"**（🔴-1 复式记账的落地延伸，"W1、W2 理论绝不偷懒"同此档）
   - 两张表：`ledger_entry`（分录组：`entry_no / biz_type / biz_no / status / created_at`，`uk_biz(biz_type,biz_no)`）+ `ledger_posting`（明细：`entry_id / account_id / direction(DEBIT/CREDIT) / amount / currency / balance_after`）。
