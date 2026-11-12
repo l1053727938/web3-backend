@@ -251,7 +251,7 @@ int insert(LedgerEntry entry);
 2. **真实撮合是双腿**：③ 目前只记计价币这一腿，资产腿需要按同一 tradeNo 另记一组。
 3. **充值落账前必须确认**：调用 `deposit()` 前确认 `deposit_record.status = CREDITED`，账本层不做链上确认判断。
 4. **冲正产生的负余额**需要在对账 Job / 风控里单独处理，否则负余额会一直挂在账户上。
-5. **场景方法目前没有 HTTP 入口**：`/api/ledger/post` 仍是通用入口；四场景方法供后续充值/交易业务直接调用。
+5. **场景方法已提供 HTTP 入口**：`POST /api/ledger/{deposit,freeze,settle,unfreeze,reverse}`，请求体 DTO 见 `model/dto/Ledger*Request`；联调数据见 `sql/ledger_test_data.sql`，一键调用见 `scripts/ledger-api-demo.sh`（或 IDEA 的 `scripts/ledger-api-demo.http`）。
 
 ---
 
@@ -277,3 +277,57 @@ int insert(LedgerEntry entry);
 
 **⑦ 什么场景可以 Redis 预扣减？**
 限额类（活动名额、API 配额）可以；账本余额绝对不行——Redis 不是事实来源，宕机/未持久化会直接资损。
+
+---
+
+## 九、HTTP 联调入口与测试数据（补充）
+
+### 9.1 接口清单
+
+| 方法 | 路径 | 对应服务方法 | 说明 |
+|---|---|---|---|
+| POST | `/api/ledger/post` | `post()` | 通用分录组入口（Day 3-4 已有） |
+| POST | `/api/ledger/deposit` | `deposit()` | ① 充值：用户 available ↑ / 平台代收负债 ↓ |
+| POST | `/api/ledger/freeze` | `freeze()` | ② 冻结：available ↓ / frozen ↑ |
+| POST | `/api/ledger/settle` | `settle()` | ③ 清算：本金 + 可选手续费两组，同事务 |
+| POST | `/api/ledger/unfreeze` | `unfreeze()` | ④ 解冻：frozen ↓ / available ↑ |
+| POST | `/api/ledger/reverse` | `reverse()` | 冲正：写反向分录，原分录不改 |
+
+所有接口都要求 JWT scope `ledger:write`（本地可先调 `POST /api/auth/token` 签发）。
+
+### 9.2 测试数据
+
+`sql/ledger_test_data.sql` 插入固定 `account.id` 的测试账户（重复执行会重置余额）：
+
+| account.id | 用户 | 类型 | 币种 | 初始可用 | 用途 |
+|---|---|---|---|---|---|
+| 900001 | 10001 | SPOT | USDT | 1000 | 用户A / Maker |
+| 900002 | 10002 | SPOT | USDT | 1000 | 用户B / Taker |
+| 900003 | 10003 | SPOT | USDT | 500 | 用户C / 手续费付款方 |
+| 900004 | 10001 | SPOT | ETH | 10 | 币种不匹配测试 |
+| 900101 | 900000001 | PLATFORM | USDT | 0 | 平台代收负债 |
+| 900102 | 900000002 | PLATFORM | USDT | 0 | 平台手续费收入 |
+
+### 9.3 一键联调
+
+```bash
+# 1. 初始化表结构与测试账户
+mysql -u root -p < sql/schema.sql
+mysql -u root -p < sql/ledger_test_data.sql
+
+# 2. 启动应用后执行（自动签发 ledger:write token）
+bash scripts/ledger-api-demo.sh
+```
+
+也可以在 IDEA 中打开 `scripts/ledger-api-demo.http` 按顺序执行；第 1 个请求会把
+`token` 与 `runId` 写入全局变量，后续请求直接引用。
+
+执行完脚本后的期望余额（基于测试数据初始值）：
+
+| 账户 | available | frozen | 说明 |
+|---|---|---|---|
+| 900001 用户A | 1100 | 0 | 充值 100 后又被冲正 |
+| 900002 用户B | 1080 | 20 | 充值 200 → 冻结 150 → 成交扣 100 → 解冻 30 |
+| 900003 用户C | 549 | 0 | 充值 50 → 手续费 1 |
+| 900101 平台代收负债 | -250 | 0 | 三笔充值合计 350，冲正退回 100 |
+| 900102 平台手续费 | 1 | 0 | 手续费收入 |

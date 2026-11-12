@@ -1,0 +1,145 @@
+### 复式账本 HTTP 联调（第 2 周 Day 5-6）
+### 使用 IntelliJ IDEA HTTP Client 打开；先执行 sql/ledger_test_data.sql 重置测试账户。
+### 顺序执行：第 1 个请求会写入 token 和 runId 两个全局变量，后续请求直接引用。
+
+@baseUrl = http://localhost:8080
+@issuerKey = local
+
+### 0. 前置检查：应用健康
+GET {{baseUrl}}/actuator/health
+
+### 1. 签发 token（scope=ledger:write）
+POST {{baseUrl}}/api/auth/token?sub=ledger-demo&scope=ledger:write
+X-Issuer-Key: {{issuerKey}}
+
+> {%
+    client.global.set("token", response.body.data.token);
+    client.global.set("runId", String(Date.now()));
+%}
+
+### 2. ① 充值：用户A +100 USDT / 平台代收负债 -100
+POST {{baseUrl}}/api/ledger/deposit
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "depositNo": "DEP-{{runId}}-A",
+  "userAccountId": 900001,
+  "platformLiabilityAccountId": 900101,
+  "amount": "100",
+  "currency": "USDT"
+}
+
+### 3. ① 充值：用户B +200 USDT
+POST {{baseUrl}}/api/ledger/deposit
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "depositNo": "DEP-{{runId}}-B",
+  "userAccountId": 900002,
+  "platformLiabilityAccountId": 900101,
+  "amount": "200",
+  "currency": "USDT"
+}
+
+### 4. ① 充值：用户C +50 USDT（手续费付款方）
+POST {{baseUrl}}/api/ledger/deposit
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "depositNo": "DEP-{{runId}}-C",
+  "userAccountId": 900003,
+  "platformLiabilityAccountId": 900101,
+  "amount": "50",
+  "currency": "USDT"
+}
+
+### 5. ② 冻结：用户B 冻结 150 USDT（available -> frozen）
+POST {{baseUrl}}/api/ledger/freeze
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "orderNo": "ORD-{{runId}}",
+  "userAccountId": 900002,
+  "amount": "150",
+  "currency": "USDT"
+}
+
+### 6. ③ 清算：本金 100 + 手续费 1（同事务两组分录）
+POST {{baseUrl}}/api/ledger/settle
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "tradeNo": "TRADE-{{runId}}",
+  "takerAccountId": 900002,
+  "makerAccountId": 900001,
+  "feePayerAccountId": 900003,
+  "platformFeeAccountId": 900102,
+  "amount": "100",
+  "fee": "1",
+  "currency": "USDT"
+}
+
+### 7. ④ 解冻：用户B 解冻 30 USDT（frozen -> available）
+POST {{baseUrl}}/api/ledger/unfreeze
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "withdrawNo": "WD-{{runId}}",
+  "userAccountId": 900002,
+  "amount": "30",
+  "currency": "USDT"
+}
+
+### 8. 冲正：撤销用户A 的充值（写反向分录，原分录不改）
+POST {{baseUrl}}/api/ledger/reverse
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "bizType": "DEPOSIT",
+  "bizNo": "DEP-{{runId}}-A"
+}
+
+### 9. 幂等：重复提交用户A 的充值（预期返回与第 2 步相同的 entryNo，余额不再变化）
+POST {{baseUrl}}/api/ledger/deposit
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "depositNo": "DEP-{{runId}}-A",
+  "userAccountId": 900001,
+  "platformLiabilityAccountId": 900101,
+  "amount": "100",
+  "currency": "USDT"
+}
+
+### 10. 反向用例：余额不足（用户B 再冻结 99999，预期 HTTP 409）
+POST {{baseUrl}}/api/ledger/freeze
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "orderNo": "ORD-FAIL-{{runId}}",
+  "userAccountId": 900002,
+  "amount": "99999",
+  "currency": "USDT"
+}
+
+### 11. 反向用例：币种不匹配（USDT 分录记到 ETH 账户，预期 HTTP 409）
+POST {{baseUrl}}/api/ledger/deposit
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "depositNo": "DEP-BAD-{{runId}}",
+  "userAccountId": 900004,
+  "platformLiabilityAccountId": 900101,
+  "amount": "1",
+  "currency": "USDT"
+}
