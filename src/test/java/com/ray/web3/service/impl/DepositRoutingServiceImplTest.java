@@ -2,11 +2,14 @@ package com.ray.web3.service.impl;
 
 import com.ray.web3.config.DepositProperties;
 import com.ray.web3.config.InfuraProperties;
-import com.ray.web3.mapper.DepositRecordMapper;
 import com.ray.web3.consts.DepositConsts;
+import com.ray.web3.consts.OutboxConsts;
+import com.ray.web3.mapper.DepositRecordMapper;
+import com.ray.web3.mapper.OutboxMessageMapper;
 import com.ray.web3.model.dto.TransferEventDTO;
 import com.ray.web3.model.entity.DepositRecord;
 import com.ray.web3.model.entity.DepositWallet;
+import com.ray.web3.model.entity.OutboxMessage;
 import com.ray.web3.service.DepositWalletService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -14,25 +17,33 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigInteger;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * 模块四充值路由离线单测（REQ-BIZ-04）：热钱包匹配 / txHash+logIndex 幂等 / 待确认落库 / deposit_channel 发布
+ * 模块四充值路由 + Outbox 同事务改造离线单测（第 3 周 Day 3-4）
  * <p>
- * 全部依赖 Mock，不连 MySQL 与 Redis
+ * 重点锁定：
+ * <ul>
+ *   <li>充值记录与 outbox_message 在同一条代码路径里写入，<b>不再直接发布 Redis</b>；</li>
+ *   <li>业务写入抛异常时不会继续写 outbox（真实事务回滚由 {@code @Transactional} 保证）；</li>
+ *   <li>outbox 写入抛异常时异常向上抛出，整个事务回滚，不会出现“充值记录落了、消息没落”；</li>
+ *   <li>{@code route()} 必须声明 {@code rollbackFor = Exception.class}，否则受检异常不会回滚。</li>
+ * </ul>
+ * 全部依赖 Mock，不连 MySQL/Redis；真实事务边界由 Spring 代理在运行时生效。
  */
 @ExtendWith(MockitoExtension.class)
 class DepositRoutingServiceImplTest {
@@ -47,7 +58,7 @@ class DepositRoutingServiceImplTest {
     @Mock
     private DepositRecordMapper depositRecordMapper;
     @Mock
-    private StringRedisTemplate stringRedisTemplate;
+    private OutboxMessageMapper outboxMessageMapper;
 
     private DepositProperties depositProperties;
     private DepositRoutingServiceImpl service;
@@ -58,11 +69,11 @@ class DepositRoutingServiceImplTest {
         InfuraProperties infuraProperties = new InfuraProperties();
         infuraProperties.setChainId(CHAIN_ID);
         service = new DepositRoutingServiceImpl(depositWalletService, depositRecordMapper,
-                stringRedisTemplate, new ObjectMapper(), infuraProperties, depositProperties);
+                outboxMessageMapper, new ObjectMapper(), infuraProperties, depositProperties);
     }
 
     @Test
-    void 命中热钱包应写入待确认充值记录并发布deposit_channel() {
+    void 命中热钱包应写入待确认充值记录并同事务写outbox消息() {
         givenHotWalletMatched();
         when(depositRecordMapper.insertIgnoreBatch(any())).thenReturn(1);
         when(depositRecordMapper.selectByTxLog(CHAIN_ID, TX_HASH, 7L)).thenReturn(storedRecord());
@@ -70,10 +81,12 @@ class DepositRoutingServiceImplTest {
         long inserted = service.route(List.of(event()), DepositConsts.Source.STREAM);
 
         assertThat(inserted).isEqualTo(1);
-        ArgumentCaptor<List<DepositRecord>> captor = ArgumentCaptor.forClass(List.class);
-        verify(depositRecordMapper).insertIgnoreBatch(captor.capture());
-        DepositRecord record = captor.getValue().getFirst();
-        // 验收标准：目标地址属于平台热钱包 → 新增一条状态为"待确认"的充值记录
+
+        // 1) 充值记录仍是待确认，notify_status=INIT 等投递器回填
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<DepositRecord>> recordCaptor = ArgumentCaptor.forClass(List.class);
+        verify(depositRecordMapper).insertIgnoreBatch(recordCaptor.capture());
+        DepositRecord record = recordCaptor.getValue().getFirst();
         assertThat(record.getStatus()).isEqualTo(DepositConsts.Status.PENDING_CONFIRM);
         assertThat(record.getToAddress()).isEqualTo(HOT_WALLET);
         assertThat(record.getWalletType()).isEqualTo(DepositConsts.WalletType.HOT);
@@ -81,41 +94,60 @@ class DepositRoutingServiceImplTest {
         assertThat(record.getLogIndex()).isEqualTo(7L);
         assertThat(record.getNotifyStatus()).isEqualTo(DepositConsts.Notify.INIT);
 
-        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
-        verify(stringRedisTemplate).convertAndSend(eq("deposit_channel"), payload.capture());
-        // 消息体带的是回读后的入库行（含自增 id 与单号），下游可据此幂等
-        assertThat(payload.getValue())
+        // 2) 同事务写一条 NEW 的 Outbox 消息，payload 是入库行快照
+        ArgumentCaptor<OutboxMessage> outboxCaptor = ArgumentCaptor.forClass(OutboxMessage.class);
+        verify(outboxMessageMapper).insert(outboxCaptor.capture());
+        OutboxMessage message = outboxCaptor.getValue();
+        assertThat(message.getBizType()).isEqualTo(OutboxConsts.BizType.DEPOSIT);
+        assertThat(message.getBizNo()).isEqualTo("DP17000000000000001");
+        assertThat(message.getStatus()).isEqualTo(OutboxConsts.Status.NEW);
+        assertThat(message.getRetryCount()).isZero();
+        assertThat(message.getPayload())
                 .contains("\"depositNo\":\"DP17000000000000001\"")
                 .contains("\"status\":\"PENDING_CONFIRM\"")
                 .contains("\"toAddress\":\"" + HOT_WALLET + "\"")
                 .contains("\"amount\":\"100.000000\"");
 
-        verify(depositRecordMapper).updateById(argIdAndStatus(1L, DepositConsts.Notify.SENT));
-    }
-
-    @Test
-    void 重复事件幂等且不再发布下游消息() {
-        givenHotWalletMatched();
-        // INSERT IGNORE 命中唯一键：0 行新增，回读也拿不到本次写入（重放/分页重叠场景）
-        when(depositRecordMapper.insertIgnoreBatch(any())).thenReturn(0);
-        when(depositRecordMapper.selectByTxLog(CHAIN_ID, TX_HASH, 7L)).thenReturn(null);
-
-        long inserted = service.route(List.of(event()), DepositConsts.Source.BACKFILL);
-
-        assertThat(inserted).isZero();
-        verify(stringRedisTemplate, never()).convertAndSend(anyString(), anyString());
+        // 3) 不再直接发布，也不在路由阶段回填 notify_status（由投递器负责）
         verify(depositRecordMapper, never()).updateById(any(DepositRecord.class));
     }
 
     @Test
-    void 非平台地址不产生充值记录() {
+    void 重复事件幂等且不写outbox消息() {
+        givenHotWalletMatched();
+        // 整片 INSERT IGNORE 0 行新增：首次入账事务已把 outbox 消息同事务写好，本次不重复补
+        when(depositRecordMapper.insertIgnoreBatch(any())).thenReturn(0);
+
+        long inserted = service.route(List.of(event()), DepositConsts.Source.BACKFILL);
+
+        assertThat(inserted).isZero();
+        verify(depositRecordMapper, never()).selectByTxLog(any(), any(), any());
+        verify(outboxMessageMapper, never()).insert(any(OutboxMessage.class));
+    }
+
+    @Test
+    void 唯一键冲突回读已存在行时仍补写outbox消息() {
+        givenHotWalletMatched();
+        when(depositRecordMapper.insertIgnoreBatch(any()))
+                .thenThrow(new DataIntegrityViolationException("uk duplicated"));
+        when(depositRecordMapper.selectByTxLog(CHAIN_ID, TX_HASH, 7L)).thenReturn(storedRecord());
+
+        long inserted = service.route(List.of(event()), DepositConsts.Source.STREAM);
+
+        // 回读命中视为已入库；outbox 仍补一条，至少一次投递，消费端按 bizNo 幂等
+        assertThat(inserted).isEqualTo(1);
+        verify(outboxMessageMapper).insert(any(OutboxMessage.class));
+    }
+
+    @Test
+    void 非平台地址不产生充值记录和outbox消息() {
         when(depositWalletService.match(anyString())).thenReturn(null);
 
         long inserted = service.route(List.of(event()), DepositConsts.Source.STREAM);
 
         assertThat(inserted).isZero();
         verify(depositRecordMapper, never()).insertIgnoreBatch(any());
-        verify(stringRedisTemplate, never()).convertAndSend(anyString(), anyString());
+        verify(outboxMessageMapper, never()).insert(any(OutboxMessage.class));
     }
 
     @Test
@@ -126,19 +158,44 @@ class DepositRoutingServiceImplTest {
 
         assertThat(service.route(List.of(event()), DepositConsts.Source.STREAM)).isZero();
         verify(depositRecordMapper, never()).insertIgnoreBatch(any());
+        verify(outboxMessageMapper, never()).insert(any(OutboxMessage.class));
     }
 
     @Test
-    void 发布失败时标记FAILED但充值记录保持已入库() {
+    void 业务写入异常时不写outbox且异常向上抛出() {
+        givenHotWalletMatched();
+        when(depositRecordMapper.insertIgnoreBatch(any()))
+                .thenThrow(new IllegalStateException("business db down"));
+
+        assertThatThrownBy(() -> service.route(List.of(event()), DepositConsts.Source.STREAM))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("business db down");
+
+        // 业务写入失败时不会走到 outbox；真实事务中 deposit_record 也会因异常回滚
+        verify(outboxMessageMapper, never()).insert(any(OutboxMessage.class));
+    }
+
+    @Test
+    void outbox写入异常向上抛出以触发整个事务回滚() {
         givenHotWalletMatched();
         when(depositRecordMapper.insertIgnoreBatch(any())).thenReturn(1);
         when(depositRecordMapper.selectByTxLog(CHAIN_ID, TX_HASH, 7L)).thenReturn(storedRecord());
-        doThrow(new IllegalStateException("redis down"))
-                .when(stringRedisTemplate).convertAndSend(anyString(), any());
+        when(outboxMessageMapper.insert(any(OutboxMessage.class)))
+                .thenThrow(new IllegalStateException("outbox db down"));
 
-        assertThat(service.route(List.of(event()), DepositConsts.Source.STREAM)).isEqualTo(1);
+        assertThatThrownBy(() -> service.route(List.of(event()), DepositConsts.Source.STREAM))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outbox db down");
+    }
 
-        verify(depositRecordMapper).updateById(argIdAndStatus(1L, DepositConsts.Notify.FAILED));
+    @Test
+    void route方法必须声明回滚所有异常的事务() throws Exception {
+        Transactional tx = DepositRoutingServiceImpl.class
+                .getMethod("route", List.class, String.class)
+                .getAnnotation(Transactional.class);
+
+        assertThat(tx).as("充值记录与 outbox 必须同事务，且任何异常都要回滚").isNotNull();
+        assertThat(tx.rollbackFor()).contains(Exception.class);
     }
 
     @Test
@@ -146,7 +203,7 @@ class DepositRoutingServiceImplTest {
         depositProperties.setEnabled(false);
 
         assertThat(service.route(List.of(event()), DepositConsts.Source.STREAM)).isZero();
-        verify(depositWalletService, never()).match(anyString());
+        verifyNoInteractions(depositWalletService, depositRecordMapper, outboxMessageMapper);
     }
 
     private void givenHotWalletMatched() {
@@ -188,13 +245,8 @@ class DepositRoutingServiceImplTest {
         record.setDecimals(6);
         record.setStatus(DepositConsts.Status.PENDING_CONFIRM);
         record.setEventSource(DepositConsts.Source.STREAM);
-        record.setNotifyStatus(DepositConsts.Notify.SENT);
+        record.setNotifyStatus(DepositConsts.Notify.INIT);
+        record.setCreatedAt(java.time.LocalDateTime.of(2026, 11, 16, 10, 0));
         return record;
-    }
-
-    /** 只关心 id + notifyStatus 的匹配器（partial update 只更新通知两列） */
-    private static DepositRecord argIdAndStatus(Long id, String notifyStatus) {
-        return org.mockito.ArgumentMatchers.argThat(r ->
-                r != null && id.equals(r.getId()) && notifyStatus.equals(r.getNotifyStatus()));
     }
 }

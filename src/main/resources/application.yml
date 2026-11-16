@@ -130,7 +130,7 @@ web3:
   # ============ 模块四：充值业务路由与落库（REQ-BIZ-04）============
   deposit:
     enabled: ${WEB3_DEPOSIT_ENABLED:true}
-    # 下游账务通知频道：入账成功后 PUBLISH deposit_channel {json}，账务系统订阅消费
+    # 下游账务通知频道：Outbox 投递器发送 deposit_channel {json}，账务系统订阅消费
     deposit-channel: ${WEB3_DEPOSIT_CHANNEL:deposit_channel}
     # 配置中心热钱包：key=地址，value=币种符号（留空=任意代币到账均计为该地址充值）
     # 与数据库 deposit_wallet 表取并集；同地址以 DB 为准，方便在库里精细启停
@@ -142,6 +142,21 @@ web3:
     # 确认阈值(区块数)：写入下游消息供账务判断最终确定性，0=不设置
     confirm-threshold: ${WEB3_DEPOSIT_CONFIRM_THRESHOLD:12}
     # 批量入库与路由分片大小不再可配：统一取常量 DbConsts.INSERT_BATCH_SIZE（流水表与充值表同口径）
+
+  # ============ 第 3 周 Day 3-4：Outbox 消息投递 ============
+  # 业务表（deposit_record）与 outbox_message 同事务写入；本组配置只控制投递器行为。
+  # 投递器停掉不影响业务落库，恢复后从 outbox_message 继续投递（至少一次 + 消费端幂等）。
+  outbox:
+    enabled: ${WEB3_OUTBOX_ENABLED:true}
+    # 轮询间隔(ms)：越小延迟越低，但空轮询越多
+    dispatch-interval-ms: ${WEB3_OUTBOX_DISPATCH_INTERVAL_MS:1000}
+    # 单轮扫描条数：对应 SELECT ... LIMIT ? FOR UPDATE SKIP LOCKED
+    batch-size: ${WEB3_OUTBOX_BATCH_SIZE:200}
+    # 最大重试次数：达到后 status=FAILED，停止自动投递转人工补偿
+    max-retries: ${WEB3_OUTBOX_MAX_RETRIES:8}
+    # 指数退避：第 1 次等待 base 秒，之后翻倍，封顶 max 秒
+    retry-base-seconds: ${WEB3_OUTBOX_RETRY_BASE_SECONDS:5}
+    retry-max-seconds: ${WEB3_OUTBOX_RETRY_MAX_SECONDS:300}
 
   # ============ 模块五：提币发交易（第 3 周：Nonce 管理/Gas 估算/离线签名/广播）============
   # 默认关闭；打开前必须用环境变量注入热钱包私钥（仅测试网密钥可直接写），私钥绝不下发节点、只本地签名

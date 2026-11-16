@@ -3,7 +3,8 @@ package com.ray.web3.model.vo;
 import java.time.LocalDateTime;
 
 /**
- * 充值入账下游通知消息（REQ-BIZ-04，Redis {@code PUBLISH deposit_channel {json}} 的载荷）
+ * 充值入账下游通知消息（REQ-BIZ-04，Outbox {@code outbox_message.payload} 的 JSON 载荷；
+ * 投递器发送到 Redis {@code deposit_channel}，后续可切换 Kafka）
  * <p>
  * 金额一律用十进制字符串：uint256 最多 78 位，超出 long/BigDecimal 常规展示范围，
  * 下游按 decimals 自行换算可无损还原 raw 值

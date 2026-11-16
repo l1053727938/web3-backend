@@ -236,3 +236,35 @@ CREATE TABLE IF NOT EXISTS `ledger_posting` (
 --   GRANT SELECT, INSERT ON web3_backend.ledger_entry   TO 'ledger_app'@'%';
 --   GRANT SELECT, INSERT ON web3_backend.ledger_posting TO 'ledger_app'@'%';
 --   GRANT SELECT, INSERT, UPDATE ON web3_backend.account TO 'ledger_app'@'%';  -- 仅余额回写，不给 DELETE
+
+-- ============================================================================
+-- 第 3 周 Day 1-2：Outbox 消息表 + 消费端幂等表
+--
+-- 设计意图：业务记录（如 deposit_record）与“待发消息”必须写进同一个本地事务，
+--   避免“先发消息后落库 → 库回滚导致下游凭空入账”和“先落库后发消息 → 进程挂掉消息永久丢”。
+--   投递器异步扫描 outbox_message 发 Kafka，成功后置 SENT；发成功但改状态前宕机 = 至少一次投递，
+--   重复由消费端 consumer_biz 主键冲突挡住。
+-- ============================================================================
+
+-- Outbox 消息表：一条待发消息一行，与业务表同事务写入
+CREATE TABLE IF NOT EXISTS `outbox_message` (
+  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `biz_type`      VARCHAR(32)     NOT NULL                COMMENT '业务类型：DEPOSIT/WITHDRAW/MATCH 等',
+  `biz_no`        VARCHAR(64)     NOT NULL                COMMENT '业务单号，消费端按此幂等',
+  `payload`       JSON            NOT NULL                COMMENT '消息体快照，避免投递时业务表已变更',
+  `status`        VARCHAR(16)     NOT NULL DEFAULT 'NEW'  COMMENT 'NEW=待投递，SENT=已投递，FAILED=重试超限',
+  `retry_count`   INT             NOT NULL DEFAULT 0      COMMENT '已重试次数（上限由投递器策略决定）',
+  `next_retry_at` DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '下次可投递时间，退避重试落点',
+  `created_at`    DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '入库时间',
+  PRIMARY KEY (`id`),
+  -- 投递器扫描：WHERE status='NEW' AND next_retry_at <= NOW() ORDER BY id LIMIT 200
+  -- 没有这个索引就是全表扫；FOR UPDATE SKIP LOCKED 负责多实例不抢同一条
+  KEY `idx_status_next` (`status`, `next_retry_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Outbox 消息表：业务记录与待发消息同事务，投递器异步补发';
+
+-- 消费端幂等表：处理消息前先 INSERT，命中主键冲突即“已消费”，直接 ack 跳过
+CREATE TABLE IF NOT EXISTS `consumer_biz` (
+  `biz_no`      VARCHAR(64) NOT NULL                COMMENT '已消费的业务单号',
+  `consumed_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '消费成功时间',
+  PRIMARY KEY (`biz_no`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='消费端幂等表：挡住 Outbox 至少一次投递带来的重复消息';

@@ -5,7 +5,9 @@ import com.ray.web3.model.entity.DepositRecord;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -13,8 +15,9 @@ import java.util.List;
  * <p>
  * 写入走 INSERT IGNORE + 唯一键 (chain_id, transaction_hash, log_index)：重连重放、补拉分页重叠、
  * 实时与补拉双写均被数据库约束消化，返回值即"本次真正新增的入账条数"；
- * 只有新增行才发布 deposit_channel，避免重复通知引起重复记账。
- * 通知状态回写走 {@code BaseMapper#updateById} 的部分字段更新（只改 notify_status/notify_at）
+ * 只有新增行才写 outbox_message（与充值记录同事务），避免重复通知引起重复记账。
+ * 通知状态回写有两种入口：普通更新走 {@code BaseMapper#updateById}；
+ * Outbox 投递器按 {@code deposit_no} 回填走 {@link #updateNotifyStatusByDepositNo}。
  */
 public interface DepositRecordMapper extends BaseMapper<DepositRecord> {
 
@@ -49,4 +52,20 @@ public interface DepositRecordMapper extends BaseMapper<DepositRecord> {
     DepositRecord selectByTxLog(@Param("chainId") Long chainId,
                                 @Param("transactionHash") String transactionHash,
                                 @Param("logIndex") Long logIndex);
+
+    /**
+     * Outbox 投递结果回填：按充值单号更新通知状态。
+     * <p>
+     * {@code notify_at} 只在成功投递时写入（{@code notifyAt} 非空），失败时传 null 用
+     * {@code COALESCE} 保留上一次成功时间，避免“重试失败”把历史成功时间清空。
+     */
+    @Update("""
+            UPDATE deposit_record
+            SET notify_status = #{status},
+                notify_at = COALESCE(#{notifyAt,jdbcType=TIMESTAMP}, notify_at)
+            WHERE deposit_no = #{depositNo}
+            """)
+    int updateNotifyStatusByDepositNo(@Param("depositNo") String depositNo,
+                                      @Param("status") String status,
+                                      @Param("notifyAt") LocalDateTime notifyAt);
 }

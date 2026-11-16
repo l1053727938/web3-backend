@@ -52,11 +52,11 @@ public final class DepositConsts {
 
     /** 下游通知状态（deposit_record.notify_status） */
     public static final class Notify {
-        /** 未发布 */
+        /** 未投递：已随充值记录落库，等待 Outbox 投递器发送 */
         public static final String INIT = "INIT";
-        /** 已发布到 Redis 频道 */
+        /** 已投递：Outbox 投递成功 */
         public static final String SENT = "SENT";
-        /** 发布失败，待补偿重发 */
+        /** 投递失败：等待 Outbox 退避重试，或已超过重试上限转人工补偿 */
         public static final String FAILED = "FAILED";
 
         private Notify() {
