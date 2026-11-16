@@ -9,15 +9,15 @@
 > **范围约束（2026-11-05）**：只保留 CEX 后端职责（交易 / 账务 / 资产网关 / 风控 / 工程）。公链协议与智能合约开发类条目（Layer2、ERC-4337 账户抽象、Intent、Foundry 重入复现、Solana、AMM/SWAP）已从正文删除，不属于 CEX 后端开发职责。
 > 已编码的**链上读写不属于"排除项"**：它是资产网关的上游入口，已按周并入整体流程（见下方「链上底座在流程中的位置」），**不重学但必须跑过、必须出现在图与口述里**。
 >
-> **代码盘点（2026-11-12 更新）**：本仓库已完成「链上读写 + 提币网关」，对应下表 5 个 🟡 单元；U1 账本的 W1（分户模型 + 三表 + 金额双轨）与 W2（`post()` + 四场景分录 + 冲正 + 连接池隔离）均已交付。详见 `CEX后端完成度对照.md`。
+> **代码盘点（2026-11-16 更新）**：链上读写 + 提币网关、复式账本 W2（三表 / post / 四场景 / 冲正 / 独立数据源 / HTTP 入口 + 20 单测）与 W3 的 Outbox/Kafka 消费者（outbox_message + 投递器 + 手动 ack + consumer_biz 幂等 + 26 个相关单测/H2 回滚测试）已交付；W3 端到端实跑待本机 MySQL 凭据。详见 README 5.15 / 5.16 与 `file/第三阶段/Day5-6消费者与本地跑通.md`。
 
 ### 各周完成度速览（✅ 已完成 / 🟡 部分 / ⬜ 未开始）
 
 | 周 | 单元 | 状态 | 说明 |
 |---|---|---|---|
-| W1 | U1-a 分户模型 + 三表 | ✅ 100% | 三表 DDL + CHECK、MoneyUtils + 4 单测已交付（2026-11-09）；账本服务按计划留到 W2 |
-| W2 | U1-b 四类分录 + 重建 | ✅ 100% | `post()` 五步、四场景分录、冲正、重建 SQL、连接池隔离 + 14 单测已交付（2026-11-12）；并发/重建实测待补 |
-| W3 | U2-a outbox + Kafka | 🟡 30% | 已有先落库后发布 + `notify_status` + 幂等键；缺 outbox/Kafka/消费者 |
+| W1 | U1-a 分户模型 + 三表 | ✅ 100% | 三表 DDL + CHECK、MoneyUtils + 4 单测已交付（2026-11-09）；账本服务已在 W2 完成 |
+| W2 | U1-b 四类分录 + 重建 | ✅ 100% | `post()` 五步、四场景分录、冲正、重建 SQL、独立数据源、HTTP 入口、20 个账本单测、联调脚本；并发/重建 diff 待实跑 |
+| W3 | U2-a outbox + Kafka | 🟡 90% | outbox_message + 投递器 + Redis/Kafka 通道 + consumer_biz 消费者 + 26 个相关单测/H2 回滚测试；Kafka 容器验证 healthy，应用端到端待本机 MySQL 凭据实跑 |
 | W4 | U2-b 重试 + 对账起头 | 🟡 25% | 已有 FAILED 状态位、RPC 退避 jitter 可迁移、条数对账；缺消费重试/DLQ/lag |
 | W5 | U3 对账与差错处置 | 🟡 15% | 已有 decimals 快照与单号体系；`INIT` 三态规则已设计、代码未写 |
 | W6 | U3.5-a 水位 + 归集 | ⬜ 10% | 现有 gas 查询/估算可 1h 盘点完；水位/补充/归集/实测全缺 |
@@ -141,7 +141,7 @@
 > - DDL 未拆成独立 `V1__account.sql`，统一维护在 `sql/schema.sql`
 > - `CHECK` 加在生成列 `total` 上属恒真约束（`total` 由 `available + frozen` 自动生成），无法用「插入不平数据」验证；不平数据实际由生成列本身 + 应用层只改 `available/frozen` 拦截
 > **纸笔产出（不在仓库）**：4 组分录、账户流转图 v1
-> **下一周**：W2 四类分录、`post()`、余额重建与冲正
+> **下一周（已完成）**：W2 四类分录、`post()`、余额重建与冲正（见 README 5.15）
 
 - **Day 1-2（3h）：[🔴 P1 死磕] 复式记账与分户模型（理论，只读 30 页）**
   - 会计恒等式：`资产 = 负债 + 所有者权益`；在 CEX 里落成"用户可用 + 用户冻结 = 用户总额"，平台侧对应"应付用户"。
@@ -188,14 +188,16 @@
 
 核心目标：`post()` 能拦住不平的分录；四个业务场景各写出一组平衡分录；**删掉余额表能重建**。
 
-> **状态：✅ 已完成 · 100%（2026-11-12）**
+> **状态：✅ 已完成 · 100%（2026-11-12 交付，2026-11-16 复核）**
 > **已交付**：
 > - 两表 DDL：`ledger_entry`（`uk_biz`、`uk_reverse_of`）+ `ledger_posting`（`balance_type`），落在 `sql/schema.sql`
 > - `LedgerService.post()` 五步（平衡校验 → 升序加锁 → 落分录 → CAS 回写 → 整组回滚）+ 幂等
 > - `LedgerGroupFactory` 四场景分录（充值/冻结/清算/解冻）+ `reverse()` 冲正（`reverse_of`、方向对调、只冲一次）
 > - 账本独立连接池：`ledgerDataSource` / `ledgerTransactionManager`，账本 Mapper 按包路由
 > - 账本 Mapper 不继承 `BaseMapper`（接口上无 update/delete），DB 授权示例写入 `schema.sql`
-> - 单测：`LedgerGroupFactoryTest` 6 个 + `LedgerServiceImplTest` 8 个，共 14 个全绿
+> - HTTP 入口：`LedgerController` 六端点 + DTO Bean Validation
+> - 单测：`LedgerGroupFactoryTest` 6 个 + `LedgerServiceImplTest` 8 个 + `LedgerScenarioRequestValidationTest` 6 个，共 20 个全绿
+> - 联调：`sql/ledger_test_data.sql` + `scripts/ledger-api-demo.sh/.http`
 > - 提交：`c89eac2` → `caff8d6` → `6f48509` → `bd3bee9`；文档见 `file/第二阶段/`
 > **与计划的偏差**：
 > - `post()` 返回 `LedgerEntry` 而非 `void`，让调用方能看到幂等命中
@@ -204,7 +206,7 @@
 > **遗留验证**：50 线程并发扣同一账户、删表重建 diff 两项已设计，尚未在库上实跑
 > **下一周**：W3 outbox、消费幂等、对账 Job
 
-- **Day 1-2（3h）：[🔴 P1 死磕] 分录模型与"删表可重建"**（🔴-1 复式记账的落地延伸，"W1、W2 理论绝不偷懒"同此档）
+- ✅ **Day 1-2（3h）：[🔴 P1 死磕] 分录模型与"删表可重建"**（🔴-1 复式记账的落地延伸，"W1、W2 理论绝不偷懒"同此档）
   - 两张表：`ledger_entry`（分录组：`entry_no / biz_type / biz_no / status / created_at`，`uk_biz(biz_type,biz_no)`）+ `ledger_posting`（明细：`entry_id / account_id / direction(DEBIT/CREDIT) / amount / currency / balance_after`）。
   - 为什么分两张：一组分录是一个原子业务，`uk_biz` 放在组上才能做幂等；明细只管金额，条数不定。
   - `balance_after` 是可审计性来源：事后能回答"这笔操作之后余额是多少"，对账出差异时靠它定位。
@@ -212,7 +214,7 @@
   - 这一步的意义：**证明你写的是账本，不是流水**。面试官问"删表能重建吗"，能当场说"能，我做过"。
   - 输出：两表 DDL + 重建 SQL。
 
-- **Day 3-4（3h）：`post()` 实现**
+- ✅ **Day 3-4（3h）：`post()` 实现**
   - 签名：`void post(LedgerGroup group)`，`LedgerGroup` 包含 `bizType / bizNo / List<Posting>`。
   - 五步，顺序不能换：
     1. 校验 `sum(DEBIT) == sum(CREDIT)`，不等直接抛 `UnbalancedLedgerException` + 资损告警（**不落库，不自动修正**）。
@@ -224,7 +226,7 @@
   - ➕ 连接池隔离（1h，本周余量）：账本 DB 用独立数据源（`ledgerDataSource` + `ledgerTransactionManager`，Hikari `maximumPoolSize=10` 独立于业务池）。理由：业务侧一条慢 SQL 把共享池占满时，`post()` 拿不到连接 → 充值/提币的余额变动全部卡死。`LedgerService` 显式绑定 ledger 事务管理器，别依赖默认的 `@Transactional`。
   - 输出：`LedgerService.post()` + 不平衡用例（断言抛异常且库中无记录）。
 
-- **Day 5-6（4h）：四场景分录 + 冲正**
+- ✅ **Day 5-6（4h）：四场景分录 + 冲正**
   - ① 充值落账：`USER.SPOT.available↑` / `PLATFORM_DEPOSIT_LIABILITY↓`（或对挂"平台待结算"），金额 = 链上到账额。
   - ② 下单冻结：`USER.SPOT.available↓` / `USER.SPOT.frozen↑`，`total` 不变。
   - ③ 成交清算：Taker `frozen↓`、Maker `available↑`，手续费单独一组 `USER.available↓ / PLATFORM_FEE↑`。
@@ -233,7 +235,7 @@
   - 禁止 UPDATE/DELETE：代码层拦截（`LedgerEntry` 无 setter）+ DB 账号只给 INSERT/SELECT（`ledger_posting` 不给 UPDATE 权限）。
   - 输出：4 组单测 + 冲正单测。
 
-- **Day 7（2h）：自测 7 题 + 提交**
+- ✅ **Day 7（2h）：自测 7 题 + 提交**
   - ① 充值 100 USDT 的分录？确认数不足能不能落账？（不能，`CREDITED` 之前分录不写）
   - ② 冻结与清算怎么衔接？撤单释放记什么？
   - ③ 同一 `withdraw_no` 重复落账靠哪层挡？
@@ -252,11 +254,11 @@
 
 核心目标：把现有"先落库再 `PUBLISH`"改成"业务 + outbox 同事务"；订阅端按 `biz_no` 幂等。这是"充值确认后通知账务"的可靠性基座。
 
-> **状态：🟡 部分完成 · 约 30%**
-> **已有**：先落库后发布（`DepositRoutingServiceImpl`）、`notify_status` INIT/SENT/FAILED 可观测、`uk_chain_tx_log` 幂等键
-> **缺**：`outbox_message` 表与投递器、Kafka、消费幂等表（现为 Redis `PUBLISH`，无消费确认与重放）
+> **状态：🟡 部分完成 · 约 90%（2026-11-16）**
+> **已有**：`outbox_message` 表、`DepositRoutingServiceImpl` 同事务写 Outbox、`OutboxDispatcher`（`SKIP LOCKED` + 指数退避）、Redis/Kafka 双通道、Kafka 消费者（手动 ack + `consumer_biz` 幂等 + 账本入账）、26 个相关单测/H2 事务回滚测试；Kafka 容器已验证 healthy
+> **待补**：用本机实际 MySQL 凭据跑一次完整端到端充值并留存三行日志/截图；WS 断线重连实跑记录
 
-- **Day 1-2（3h）：[🔴 P1 死磕：Outbox 原理 · 🟡 P2 理解：Kafka 概念] Kafka 概念 + outbox 表**
+- ✅ **Day 1-2（3h）：[🔴 P1 死磕：Outbox 原理 · 🟡 P2 理解：Kafka 概念] Kafka 概念 + outbox 表**
   - Kafka 四件事（🟡 P2）只取结论，不碰源码；Outbox 同事务与"至少一次必重复"的推理（🔴 P1）必须能脱稿讲。
   - 只搞清四件事：分区（同一 key 有序）、offset（消费者自己维护进度）、消费者组（同组内一条消息只被一个实例消费）、rebalance（会短暂停消费）。
   - "至少一次"意味着**一定会重复**，所以幂等不是优化，是前提。
@@ -265,14 +267,14 @@
   - `outbox_message` 表：`id / biz_type / biz_no / payload JSON / status(NEW/SENT/FAILED) / retry_count / next_retry_at / created_at`，索引 `idx_status_next(status, next_retry_at)`。
   - 输出：DDL + 一页概念卡（分区/offset/组/rebalance 各一行）。
 
-- **Day 3-4（3h）：改造充值链路**
+- ✅ **Day 3-4（3h）：改造充值链路**
   - 打开 `DepositRoutingServiceImpl`，把 `stringRedisTemplate.convertAndSend(...)`（现状是 Redis 发布，不是 Kafka）换成同事务 `outboxMapper.insert(...)`，`notify_status` 继续作为投递结果字段保留。
   - 关键：`@Transactional` 必须包住"业务表写入 + outbox 插入"，两者同生共死。写个单测：让业务抛异常，断言 outbox 里也没有记录。
   - 投递器：`SELECT * FROM outbox_message WHERE status='NEW' AND next_retry_at <= NOW() LIMIT 200 FOR UPDATE SKIP LOCKED`（防多实例抢同一条）。
   - 投递成功后 `status='SENT'`；失败 `retry_count+1`，按退避算 `next_retry_at`。
   - 输出：改造 commit + 单测（业务回滚则 outbox 为空）。
 
-- **Day 5-6（4h）：消费者与本地跑通**
+- 🟡 **Day 5-6（4h）：消费者与本地跑通**
   - `docker compose` 起 Kafka（KRaft 单节点即可，别折腾 ZK）。
   - 消费者：`enable.auto.commit=false`，处理成功才 `ack.acknowledge()`。
   - 幂等表：`consumer_biz (biz_no VARCHAR PK, consumed_at)`，处理前 `INSERT` 命中主键冲突 → 直接 ack 跳过。

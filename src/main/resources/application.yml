@@ -47,6 +47,26 @@ spring:
       # 本地 Redis 无密码时不要配置 password 行（包括空字符串），否则 Redisson 仍会发送 AUTH 导致启动报错
       database: ${REDIS_DATABASE:0}
 
+  # ============ Kafka（第 3 周 Day 5-6：Outbox 投递 + 消费者入账）============
+  # 默认 transport=redis 时不启动监听容器；切 Kafka 需同时设置 WEB3_OUTBOX_TRANSPORT=kafka
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # 等待所有 ISR 确认，配合 Outbox 至少一次投递
+      acks: all
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP:web3-outbox}
+      auto-offset-reset: earliest
+      # 手动 ack 的前提：关闭自动提交
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      # MANUAL_IMMEDIATE：ack.acknowledge() 后立即提交 offset
+      ack-mode: manual_immediate
+
 # ============ MyBatis-Plus ============
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
@@ -143,11 +163,20 @@ web3:
     confirm-threshold: ${WEB3_DEPOSIT_CONFIRM_THRESHOLD:12}
     # 批量入库与路由分片大小不再可配：统一取常量 DbConsts.INSERT_BATCH_SIZE（流水表与充值表同口径）
 
-  # ============ 第 3 周 Day 3-4：Outbox 消息投递 ============
+    # ===== Day 5-6：充值消息消费入账（web3.outbox.transport=kafka 时生效）=====
+    consumer:
+      # 平台代收负债账户 ID（account_type=PLATFORM）；本地测试数据默认 900101，生产必须覆盖
+      platform-liability-account-id: ${WEB3_PLATFORM_LIABILITY_ACCOUNT_ID:900101}
+      # 用户账户类型：充值默认入 SPOT
+      user-account-type: ${WEB3_DEPOSIT_USER_ACCOUNT_TYPE:SPOT}
+
+  # ============ 第 3 周 Day 3-6：Outbox 消息投递与消费者 ============
   # 业务表（deposit_record）与 outbox_message 同事务写入；本组配置只控制投递器行为。
   # 投递器停掉不影响业务落库，恢复后从 outbox_message 继续投递（至少一次 + 消费端幂等）。
   outbox:
     enabled: ${WEB3_OUTBOX_ENABLED:true}
+    # 投递通道：redis=Redis 频道（默认，保持旧行为）；kafka=Kafka 投递并启用消费者入账
+    transport: ${WEB3_OUTBOX_TRANSPORT:redis}
     # 轮询间隔(ms)：越小延迟越低，但空轮询越多
     dispatch-interval-ms: ${WEB3_OUTBOX_DISPATCH_INTERVAL_MS:1000}
     # 单轮扫描条数：对应 SELECT ... LIMIT ? FOR UPDATE SKIP LOCKED
@@ -157,6 +186,13 @@ web3:
     # 指数退避：第 1 次等待 base 秒，之后翻倍，封顶 max 秒
     retry-base-seconds: ${WEB3_OUTBOX_RETRY_BASE_SECONDS:5}
     retry-max-seconds: ${WEB3_OUTBOX_RETRY_MAX_SECONDS:300}
+    # Kafka 通道参数（transport=kafka 时生效）
+    kafka:
+      topic: ${WEB3_OUTBOX_KAFKA_TOPIC:deposit-outbox}
+      partitions: ${WEB3_OUTBOX_KAFKA_PARTITIONS:1}
+      replicas: ${WEB3_OUTBOX_KAFKA_REPLICAS:1}
+      # 单条消息等待 broker 确认的超时(秒)，超时按投递失败退避
+      send-timeout-seconds: ${WEB3_OUTBOX_KAFKA_SEND_TIMEOUT_SECONDS:5}
 
   # ============ 模块五：提币发交易（第 3 周：Nonce 管理/Gas 估算/离线签名/广播）============
   # 默认关闭；打开前必须用环境变量注入热钱包私钥（仅测试网密钥可直接写），私钥绝不下发节点、只本地签名

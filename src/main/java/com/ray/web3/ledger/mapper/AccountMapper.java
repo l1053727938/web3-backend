@@ -36,6 +36,20 @@ public interface AccountMapper extends BaseMapper<Account> {
     Account selectByIdForUpdate(@Param("id") Long id);
 
     /**
+     * 按用户 + 账户类型 + 币种查账户（无锁读），供充值消费者把 userId 解析成 account.id。
+     * <p>
+     * {@code uk_user_type_currency} 保证最多一行；账户不存在返回 null，由调用方决定失败语义。
+     */
+    @Select("""
+            SELECT id, user_id, account_type, currency, available, frozen, version
+            FROM `account`
+            WHERE user_id = #{userId} AND account_type = #{accountType} AND currency = #{currency}
+            """)
+    Account selectByUserTypeCurrency(@Param("userId") long userId,
+                                     @Param("accountType") String accountType,
+                                     @Param("currency") String currency);
+
+    /**
      * 乐观锁回写余额：命中 {@code (id, version)} 才算成功，返回 0 表示期间被并发事务改过，
      * 调用方必须抛异常回滚整组分录，而不是重读后重试（重试会让 balance_after 失真）。
      */

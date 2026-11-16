@@ -95,6 +95,12 @@
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
+        <!-- Spring Kafka：第 3 周 Day 5-6 Outbox → Kafka → 消费者入账 -->
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
+
         <!-- Redisson：分布式锁（提币防重、区块扫描互斥） -->
         <dependency>
             <groupId>org.redisson</groupId>

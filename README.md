@@ -3,9 +3,10 @@
 > 基于 **Web3j 6 + Infura** 的以太坊后端骨架，面向钱包 / 充值提币 / 链上数据查询场景。
 > 已提供 13 个链上查询/补拉/充值配置 REST 接口、ERC-20 Transfer 事件解码入库（断点续传 + 幂等）、
 > WebSocket（`eth_subscribe`）实时转账订阅引擎（断线重连 + newHeads 心跳僵尸判定 + 批量落库路由）、
-> 定时自动核对（游标→链高自动追平）与手动区间补拉双入口，以及充值业务闭环（热钱包匹配 → 幂等入账 → Redis 通知下游）。
+> 定时自动核对（游标→链高自动追平）与手动区间补拉双入口，充值业务闭环（热钱包匹配 → 幂等入账 → 同事务 Outbox），
+> 以及复式账本（借贷分录/冲正/独立连接池）与 Outbox → Kafka 消费者入账（手动 ack + consumer_biz 幂等）。
 
-- JDK 21 + Spring Boot 4.1.2 + Spring 7.0.10 + MySQL/Redis + MyBatis-Plus + Web3j 6.1.0 + Infura
+- JDK 21 + Spring Boot 4.1.2 + Spring 7.0.10 + MySQL/Redis/Kafka + MyBatis-Plus + Spring Kafka + Web3j 6.1.0 + Infura
 - 技术选型详解见 [`docs/技术选型.md`](docs/技术选型.md)
 
 ---
@@ -33,14 +34,20 @@
 - **统一响应与异常处理**：`ApiResponse` 封装 + `GlobalExceptionHandler`（RPC 类异常统一转 `502`）
 - **API 文档**：SpringDoc OpenAPI 3.1（`/swagger-ui.html`、`/v3/api-docs`）
 - **可观测性**：Actuator + Micrometer Prometheus
-- **离线单元测试**：31 个 JUnit 5（含 Mockito）用例（不依赖真实节点/DB/Redis，覆盖模块四充值路由、热钱包匹配、参数校验口径与第 2 周 JWT/限流行为），`mvn test` 全绿
+- **离线单元测试**：137 个 JUnit 5（含 Mockito/H2）用例（不依赖真实节点/DB/Redis，覆盖充值路由、Outbox 投递/消费幂等、账本分录、参数校验与第 2 周 JWT/限流行为），`mvn test` 全绿
 - **充值业务路由与落库（模块四）**：实时/补拉解出的 Transfer 事件按 `to` 地址比对平台热钱包与用户充值地址（配置中心 + `deposit_wallet` 表），
-  命中则以 `(chain_id, txHash, logIndex)` 唯一键幂等写入 `deposit_record`（状态**待确认**），随后 `PUBLISH deposit_channel {json}` 通知下游账务（详见 [5.10](#510-充值业务路由与落库模块四)）
-- **对外 API 安全（第 2 周打底，默认关闭）**：`/api/chain/**` 可选挂 JWT（HS256）鉴权拦截器（无/过期 Token→401、scope 不足→403，健康检查放行）；
+  命中则以 `(chain_id, txHash, logIndex)` 唯一键幂等写入 `deposit_record`（状态**待确认**），并在同一事务写 `outbox_message`（详见 [5.10](#510-充值业务路由与落库模块四)、[5.16](#516-outbox-消息投递与-kafka-消费者第-3-周)）
+- **复式账本（第 2 周）**：`account` 余额物化 + `ledger_entry`/`ledger_posting` 只增不改；借贷平衡、按 account_id 升序加锁、
+  乐观锁回写、同事务落库；支持充值/冻结/清算/解冻/冲正，场景分录由 `LedgerGroupFactory` 纯函数生成（详见 [5.15](#515-复式账本第-2-周)）
+- **Outbox 消息投递（第 3 周）**：业务表与 `outbox_message` 同事务，投递器用 `FOR UPDATE SKIP LOCKED` 多实例扫描；
+  成功置 `SENT`，失败累计次数并按指数退避，超限置 `FAILED`；通道可在 Redis（默认）与 Kafka 间切换（详见 [5.16](#516-outbox-消息投递与-kafka-消费者第-3-周)）
+- **Kafka 消费者与账本入账（第 3 周 Day 5-6）**：`enable.auto.commit=false` + 手动 ack；`consumer_biz` 主键幂等，
+  重复消息直接 ack 跳过；按 userId/currency 解析账户后调用 `LedgerService.deposit()`，账本 `uk_biz` 兜底幂等
+- **对外 API 安全（第 2 周打底，默认关闭）**：`/api/chain/**` 与 `/api/ledger/**` 可选挂 JWT（HS256）鉴权拦截器（无/过期 Token→401、scope 不足→403，健康检查放行）；
   `eth_getLogs` 类日志/区块查询入口可选挂 Guava 令牌桶限流（超速率→429）；HMAC 请求签名先出设计文档（详见 [5.14](#514-对外-api-安全jwt-鉴权--入口令牌桶第-2-周打底)）
 
 ### 规划中
-- 提币服务、多链扩展、托管钱包；充值确认推进（`PENDING_CONFIRM → CREDITED`）与 `notify_status=FAILED` 的定时重发补偿
+- 多链扩展、托管钱包；充值确认推进（`PENDING_CONFIRM → CREDITED`）与 `consumer_biz`/`outbox_message` 历史数据归档
 
 ---
 
@@ -54,10 +61,11 @@
 | JSON | Jackson 3（`tools.jackson`）+ Jackson 2 双栈 | 3.1.7 / 2.21.7 | Boot 4 默认 Jackson 3；web3j 6 亦基于 Jackson 3，二者共享 `jackson-annotations` 2.21 |
 | 链节点接入 | Infura | — | 托管 RPC 节点（HTTP + WebSocket） |
 | 构建工具 | Maven | 3.9.x | 依赖管理与打包 |
-| ORM | MyBatis-Plus | 3.5.18（`spring-boot4-starter`） | 游标/流水/充值记录持久化 |
-| 数据库 | MySQL | 8.x | `block_sync_state`、流水表 |
+| ORM | MyBatis-Plus | 3.5.18（`spring-boot4-starter`） | 游标/流水/充值/账本/Outbox 持久化 |
+| 数据库 | MySQL | 8.x | `block_sync_state`、流水、充值、账本、Outbox 等表 |
 | 缓存 | Redis | 7.x | 热点缓存、分布式协调 |
 | 分布式锁 | Redisson | 4.8.0 | 自动核对互斥、提币防重 |
+| 消息队列 | Spring Kafka / Apache Kafka | 4.1.2 / 3.9.0（KRaft） | Outbox 异步投递与充值消费者入账（第 3 周） |
 | RPC 容错 | Resilience4j | 2.4.0（`resilience4j-spring-boot4`） | 重试 + 熔断，需配合 `spring-boot-starter-aspectj` |
 | 任务调度 | Spring Scheduler + XXL-Job | 3.5.0（可选） | 定时核对触发 |
 | API 文档 | SpringDoc OpenAPI | 3.2.0 | Swagger UI |
@@ -90,9 +98,9 @@
 │  OkHttp)  │  newHeads/logs)  │  游标 → 链高 自动补拉        │
 ├───────────┴──────────────────┴───────────────────────────┤
 │  持久层  MyBatis-Plus → MySQL（block_sync_state /          │
-│         transfer_event_log，游标与事件同事务；             │
-│         deposit_wallet / deposit_record 充值闭环）        │
-│  缓存/锁 → Redis（游标缓存 + Redisson 锁 + deposit_channel）  │
+│         transfer_event_log；deposit_record / outbox；     │
+│         account / ledger_entry / ledger_posting）         │
+│  缓存/锁 → Redis；Outbox → Redis/Kafka；账本独立连接池      │
 ├──────────────────────────────────────────────────────────┤
 │  可观测  Actuator + Prometheus     文档  Swagger UI         │
 └──────────────────────────────────────────────────────────┘
@@ -106,7 +114,12 @@
 ```
 web3-backend
 ├── pom.xml
-├── sql/schema.sql                            # MySQL 初始化脚本（四张表）
+├── docker-compose.yml                        # 本地 KRaft 单节点 Kafka（第 3 周）
+├── sql/schema.sql                            # MySQL 初始化脚本（全部表）
+├── sql/ledger_test_data.sql                  # 复式账本联调账户（可选）
+├── sql/kafka_demo_data.sql                   # Kafka 端到端演示充值地址（可选）
+├── scripts/ledger-api-demo.sh / .http        # 账本四场景 + 冲正一键联调
+├── file/第三阶段/Day5-6消费者与本地跑通.md    # Kafka 端到端联调步骤与关键日志
 ├── docs/技术选型.md                            # 技术选型详解
 ├── docs/实时充值业务流程.md                     # 纯业务视角的充值流程说明（不含技术实现）
 ├── docs/HMAC签名方案设计.md                    # 第 2 周：外部调用方/Webhook 的 HMAC 请求签名设计（不含代码）
@@ -118,11 +131,18 @@ web3-backend
     │   ├── BackfillProperties.java           # web3.backfill.*（开关/单页跨度/单次上限/游标缓存/自动核对）
     │   ├── WebSocketProperties.java          # web3.websocket.* 配置绑定（url/代理/订阅开关/合约列表/重连/心跳）
     │   ├── DepositProperties.java            # web3.deposit.*（开关/频道/配置侧热钱包/缓存 TTL/确认阈值）
+    │   ├── DepositConsumerProperties.java    # web3.deposit.consumer.*（平台负债账户/用户账户类型）
+    │   ├── OutboxProperties.java             # web3.outbox.*（通道/批量/重试/Kafka topic）
     │   ├── Web3jConfig.java                  # HTTP Web3j Bean（OkHttp 可选代理）
     │   ├── WebSocketConfig.java              # WebSocketService + wsWeb3j Bean（CONNECT 隧道注入）
     │   ├── WebSocketServiceFactory.java      # service/web3j 工厂（代理隧道收敛点，供断线重连整套重建）
     │   ├── RedisConfig.java                  # RedisTemplate 序列化（Jackson 3）
-    │   ├── DepositConfig.java                # 注册 DepositProperties
+    │   ├── DepositConfig.java                # 注册 DepositProperties + DepositConsumerProperties
+    │   ├── OutboxConfig.java                 # 注册 OutboxProperties
+    │   ├── KafkaOutboxConfig.java            # transport=kafka 时创建 topic
+    │   ├── DataSourceConfig.java             # 业务连接池/事务管理器（@Primary）
+    │   ├── LedgerDataSourceConfig.java       # 账本独立连接池 + ledgerTransactionManager
+    │   ├── MybatisFactorySupport.java        # 两套 SqlSessionFactory 的统一构造
     │   ├── AuthProperties.java               # security.*（JWT 鉴权 / 入口限流：模式、洪峰策略、四道闸参数）
     │   ├── SecurityConfig.java               # 对外 API 安全装配（enabled=true 才条件注册拦截器，按 mode 选守卫）
     │   ├── OpenApiConfig.java                # Swagger 文档增强（bearerAuth 方案，让 UI 出现 Authorize 按钮）
@@ -138,10 +158,23 @@ web3-backend
     ├── consts/EventConsts.java               # ERC-20 Transfer 事件定义（ABI 编码用）
     ├── consts/PatternConsts.java             # 地址/交易哈希校验正则（各 Service 共用）
     ├── consts/DbConsts.java                  # 批量入库行数常量（全项目单一口径）
+    ├── consts/DepositConsts.java             # 充值地址类型/状态/来源/通知状态
+    ├── consts/LedgerConsts.java              # 账本 bizType/status/accountType
+    ├── consts/OutboxConsts.java              # Outbox bizType/status
+    ├── enums/Direction.java                  # CREDIT=余额增加 / DEBIT=余额减少
+    ├── enums/BalanceType.java                # AVAILABLE/FROZEN 子账
     ├── controller/ChainController.java       # 链上查询 + 历史补拉 + 充值地址配置 REST API（13 个端点）
     ├── controller/AuthController.java        # POST /api/auth/token 签发接口（受 issuer-access-key 保护，仅 enabled=true 注册）
+    ├── controller/LedgerController.java      # /api/ledger/** 六端点（post/deposit/freeze/settle/unfreeze/reverse）
+    ├── ledger/
+    │   ├── LedgerGroupFactory.java           # 四场景 + 冲正分录纯函数
+    │   └── mapper/
+    │       ├── AccountMapper.java            # 账本池；行锁 + 乐观锁回写
+    │       ├── LedgerEntryMapper.java        # 分录组只增不改
+    │       └── LedgerPostingMapper.java      # 批量写分录明细
     ├── listener/ChainEventListener.java      # WS 实时订阅（newHeads + logs，观测用）
     ├── listener/TransferStreamEngine.java    # 模块三：实时订阅引擎（解码入队 + 批量落库路由 + 断线重连 + newHeads 心跳）
+    ├── listener/DepositOutboxConsumer.java   # Kafka 消费者：手动 ack + consumer_biz 幂等 + 调账本
     ├── service/
     │   ├── ChainService.java                 # 链上查询接口
     │   ├── EventLogService.java              # eth_getLogs 分页拉取 + 单页拉取接口
@@ -150,8 +183,10 @@ web3-backend
     │   ├── SyncCursorService.java            # 补拉游标读写（MySQL 事实 + Redis 缓存）
     │   ├── TransferEventStoreService.java    # 分页事件落库 + 游标同事务推进
     │   ├── DepositWalletService.java         # 热钱包/用户充值地址匹配（内存索引 + TTL 回源）
-    │   ├── DepositRoutingService.java        # 充值路由：匹配 → 幂等入账 → Redis 发布
+    │   ├── DepositRoutingService.java        # 充值路由：匹配 → 幂等入账 → 同事务写 Outbox
     │   ├── HistoryBackfillService.java       # 历史补拉编排入口
+    │   ├── LedgerService.java                # 账本写入口 + 冲正/四场景
+    │   ├── OutboxPublisher.java              # 投递通道接口（Redis/Kafka）
     │   └── impl/
     │       ├── ChainServiceImpl.java         # Web3j 调用 + @Retry/@CircuitBreaker("rpc")
     │       ├── EventLogServiceImpl.java      # 分段循环 + 自适应缩跨度 + 日志解码
@@ -160,20 +195,33 @@ web3-backend
     │       ├── SyncCursorServiceImpl.java    # 游标 upsert/回源 + 缓存降级
     │       ├── TransferEventStoreServiceImpl.java # INSERT IGNORE 分批写入
     │       ├── DepositWalletServiceImpl.java     # 配置+DB 并集的小写地址索引
-    │       ├── DepositRoutingServiceImpl.java    # 待确认入账 + deposit_channel 发布
-    │       └── HistoryBackfillServiceImpl.java # 逐页推进 + Redisson 互斥
+    │       ├── DepositRoutingServiceImpl.java    # 待确认入账 + 同事务写 Outbox
+    │       ├── LedgerServiceImpl.java            # 借贷平衡/加锁/落库/乐观锁/冲正
+    │       ├── OutboxDispatcher.java             # SKIP LOCKED 扫描 + SENT/FAILED/退避
+    │       ├── RedisOutboxPublisher.java         # transport=redis（默认）
+    │       ├── KafkaOutboxPublisher.java         # transport=kafka
+    │       ├── DepositCreditService.java         # consumer_biz 幂等 + 账户解析 + 调账本
+    │       └── HistoryBackfillServiceImpl.java   # 逐页推进 + Redisson 互斥
     ├── scanner/AutoBackfillScanner.java      # 定时自动核对（游标→链高补拉，双触发 + 全局锁）
+    ├── scanner/OutboxDispatchScheduler.java  # 定时触发 OutboxDispatcher（多实例靠 SKIP LOCKED）
     ├── mapper/
     │   ├── BlockSyncStateMapper.java         # 游标 upsert（GREATEST 单调前移）/ 回读
     │   ├── TransferEventLogMapper.java       # INSERT IGNORE 批量写 + 对账计数
     │   ├── DepositWalletMapper.java          # 启用充值地址全量加载（供缓存）
-    │   └── DepositRecordMapper.java          # 充值记录 INSERT IGNORE + 幂等回读 + 通知状态更新
+    │   ├── DepositRecordMapper.java          # 充值记录 INSERT IGNORE + 幂等回读 + 通知状态更新
+    │   ├── ConsumerBizMapper.java            # INSERT IGNORE consumer_biz（消费幂等）
+    │   └── OutboxMessageMapper.java          # 插入 / SKIP LOCKED 扫描 / SENT / 退避
     ├── model/
     │   ├── entity/BlockSyncState.java        # 补拉游标实体（唯一键 chain+contract）
     │   ├── entity/TransferEventLog.java      # Transfer 流水实体
     │   ├── entity/DepositWallet.java         # 充值地址配置实体
     │   ├── entity/DepositRecord.java         # 充值记录实体（状态待确认）
-    │   ├── DepositConsts.java                # 地址类型/充值状态/来源/通知状态常量
+    │   ├── entity/OutboxMessage.java         # Outbox 消息实体
+    │   ├── entity/Account.java               # 余额物化实体（含 version）
+    │   ├── entity/LedgerEntry.java           # 分录组实体（只增不改）
+    │   ├── entity/LedgerPosting.java         # 分录明细实体
+    │   ├── ledger/LedgerGroup.java           # 分录组值对象（bizType/bizNo/postings/reverseOf）
+    │   ├── ledger/Posting.java               # 单条分录值对象（方向/金额/币种/子账）
     │   ├── dto/TransferEventDTO.java         # 解码后的 Transfer 事件
     │   └── vo/                               # ApiResponse / ChainStatusVO / BalanceVO / TransferLogVO / BackfillResultVO / DepositEventVO
     ├── util/
@@ -184,6 +232,7 @@ web3-backend
     │   ├── ClientIdentityResolver.java       # 限流分 key 身份解析：JWT sub → X-Forwarded-For → 对端地址
     │   ├── BoundedQueueRateLimiter.java      # 有界排队原语（处理槽 + 排队预算双约束，洪峰策略 BOUNDED_QUEUE）
     │   ├── LeakyBucketRateLimiter.java       # 自研漏桶（匀速不放大突发，供限流对比实验）
+    │   ├── OutboxBackoff.java                # 指数退避纯函数（base 翻倍、封顶）
     │   ├── HttpResponseUtil.java             # 拦截器层直写统一 ApiResponse JSON（绕过全局异常处理器）
     │   └── TransferEventDecoder.java         # topic[0] 计算 + 日志→TransferEventDTO 解码
     └── exception/GlobalExceptionHandler.java # 校验/参数/RPC/交易异常统一响应
@@ -193,7 +242,7 @@ web3-backend
 
 ## 四、REST API
 
-基础路径：`/api/chain`，统一响应结构 `ApiResponse<T>{ code, message, data }`（`code=0` 表示成功）。
+基础路径：`/api/chain` 与 `/api/ledger`，统一响应结构 `ApiResponse<T>{ code, message, data }`（`code=0` 表示成功）。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -211,6 +260,16 @@ web3-backend
 | DELETE | `/api/chain/deposit/wallets/{address}` | 停用充值地址（`status=0`，历史充值记录保留）；`chainId` 为空取当前链 |
 | POST | `/api/chain/deposit/wallets/refresh` | 强制回源重建地址内存索引（新增/停用后无需等 TTL），返回生效地址数 |
 | POST | `/api/auth/token` | **签发 JWT（本地/联调用）**：需头 `X-Issuer-Key`=`security.jwt.issuer-access-key`；`sub` 必填、`scope` 可选（留空默认 `chain:read log:query deposit:read`）。仅 `security.jwt.enabled=true` 时注册；不在 `/api/chain/**` 拦截范围内（避免自拦）；详见 [5.14](#514-对外-api-安全jwt-鉴权--入口令牌桶第-2-周打底) |
+| POST | `/api/ledger/post` | 通用分录组入口：借贷平衡校验 → 落 `ledger_entry`/`ledger_posting` → 乐观锁回写 `account`；需 scope `ledger:write` |
+| POST | `/api/ledger/deposit` | ① 充值落账：用户 available ↑ / 平台代收负债 ↓ |
+| POST | `/api/ledger/freeze` | ② 下单冻结：available ↓ / frozen ↑，总额不变 |
+| POST | `/api/ledger/settle` | ③ 成交清算：本金 + 可选手续费两组分录，同一事务 |
+| POST | `/api/ledger/unfreeze` | ④ 提币失败解冻：frozen ↓ / available ↑ |
+| POST | `/api/ledger/reverse` | 冲正：按 `(bizType, bizNo)` 写反向分录，原分录不改；幂等且允许负余额 |
+
+账本接口统一返回 `ApiResponse<LedgerEntry>`（`settle` 返回 `{principal, fee}`），金额用十进制字符串；
+请求 DTO 与 Bean Validation 见 `model/dto/Ledger*Request`，联调数据见 `sql/ledger_test_data.sql`、
+`scripts/ledger-api-demo.sh` / `.http`。
 
 **示例**
 
@@ -443,7 +502,7 @@ web3:
 | `block_number` | 入账区块高度，确认数 = 链上最新高度 - 此值 |
 | `raw_value` / `display_value` / `decimals` | 金额与精度快照（同流水表用 `VARCHAR`，容纳 `uint256`） |
 | `status` | `PENDING_CONFIRM`（待确认）/ `CREDITED`（已入账）/ `INVALID`（重组作废） |
-| `notify_status` / `notify_at` | 下游发布状态 `INIT`/`SENT`/`FAILED`，`FAILED` 可据此补偿重发 |
+| `notify_status` / `notify_at` | Outbox 投递结果：`INIT`（待投递）/`SENT`（已投递）/`FAILED`（投递失败，等待退避重试或已超限）；`notify_at` 为最近一次成功投递时间 |
 | `event_source` | `STREAM`=WebSocket 实时订阅，`BACKFILL`=历史补拉 |
 
 ### 5.9 安全与密钥
@@ -452,7 +511,8 @@ web3:
 
 ### 5.10 充值业务路由与落库（模块四）
 把“链上解析出的 Transfer 事件”变成“平台充值记录”，`DepositRoutingService.route(events, source)` 三步一体；
-实时链路（`TransferStreamEngine` 工作线程）与补拉链路（`HistoryBackfillServiceImpl` 逐页）均在**落库事务提交后**调用它。
+实时链路（`TransferStreamEngine` 工作线程）与补拉链路（`HistoryBackfillServiceImpl` 逐页）均在**事件流水落库事务提交后**调用它。
+`route()` 自己开事务，把“充值记录 + Outbox 消息”写成同生共死的一组。
 
 **1. 热钱包匹配**（`DepositWalletService`）
 - 地址两个来源取并集：配置中心 `web3.deposit.hot-wallets`（少量平台归集地址）+ `deposit_wallet` 表（用户地址量大/频变）；
@@ -466,16 +526,18 @@ web3:
 - 写入以 `INSERT IGNORE` + 唯一键 `(chain_id, transaction_hash, log_index)` 进 `deposit_record`：重连重放、
   补拉分页重叠、实时与补拉双写都只新增一行；`deposit_no` 另有唯一键，而 `INSERT IGNORE` 会把“单号重复”也当作重复行静默丢弃，
   所以单号必须用 64bit 随机量保证结构上不可能碰撞。
-- 新增行统一按幂等键回读一次：既拿到自增 id（`notify_status` 需按行更新），也过滤掉被 IGNORE 的重复行。
+- 新增行统一按幂等键回读一次：既拿到自增 id（下游消息需要业务主键），也过滤掉被 IGNORE 的重复行。
+- 整片 `INSERT IGNORE` 0 行新增（纯重放/重叠）时不补 Outbox：首次入账事务已经把消息同事务写好，避免重复通知。
 - 多实例并发路由同一笔事件时 `INSERT IGNORE` 仍可能抛唯一键冲突：逐行回读，金额/地址一致则当正常入账，
   不一致则 ERROR 告警等人工裁决（**不自动覆盖**，同一幂等键不同金额属链上异常）。
 
-**3. 入账触发（下游通知）**
-- 先落库后 `PUBLISH deposit_channel {json}`（载荷 `DepositEventVO`，走 `StringRedisTemplate.convertAndSend`，消息体为可直接阅读的 JSON 字符串）。
-  反过来“先发布后落库”会让落库失败时下游收到一笔不存在的充值，账务对不平。
-- 只有“真正新增”的行才发布；发布成功置 `notify_status=SENT`，失败置 `FAILED`（充值记录已提交，不受影响），可据此补偿重发。
+**3. 入账触发（Outbox 同事务）**
+- `deposit_record` 与 `outbox_message(status=NEW)` 在同一个 `@Transactional` 里写入：业务成功消息必在，业务回滚消息必不在。
+- 消息体在事务内序列化为 `DepositEventVO` 快照；序列化或 Outbox 插入失败都会让整笔事务回滚。
+- `notify_status` 落库时固定 `INIT`，由 Outbox 投递器发送成功/失败后回填 `SENT`/`FAILED`。
+  Redis 只是 `transport=redis` 时的临时通道，`transport=kafka` 时改发 Kafka 并启用消费者（见 [5.16](#516-outbox-消息投递与-kafka-消费者第-3-周)）。
 - 新记录状态固定 `PENDING_CONFIRM`（待确认）；`confirm-threshold`（默认 12 块）随消息下发供下游判断最终确定性，
-  确认推进（`CREDITED`）与 `FAILED` 重发属后续任务，本期只留字段与常量，不在路由环节做链上高度回查。
+  确认推进（`CREDITED`）属后续任务，不在路由环节做链上高度回查。
 - 路由异常在两条链路上都单独兜住（只记 ERROR）：账务侧故障不能中断实时订阅入队，也不能打断整段补拉留下游标空洞；
   缺失部分由补拉重跑区间自然补齐（幂等）。
 
@@ -532,10 +594,10 @@ web3:
 关闭时拦截器完全不挂到 MVC 链，对现有调用零影响。
 
 **1. JWT 鉴权**（`JwtAuthInterceptor` + `JwtTokenProvider`，HS256/HMAC 对称签名）
-- 拦 `/api/chain/**`；`/actuator/health`、`/swagger-ui/**`、`/v3/api-docs` 不在拦截范围，即健康检查始终放行。
+- 拦 `/api/chain/**` 与 `/api/ledger/**`；`/actuator/health`、`/swagger-ui/**`、`/v3/api-docs` 不在拦截范围，即健康检查始终放行。
 - 流程：提取 `Authorization: Bearer <token>` → HS256 验签（容忍 `clock-skew-seconds` 时钟偏差）→ 过期判 401 → 按路径推所需 scope 匹配判 403。
 - claims：`sub`（服务/用户标识）、`scope`（空格分隔权限）、`iat/exp`（内部服务间建议 5-15 分钟短时效）、`jti`（为后续吊销留扩展点）。
-- scope 口径（粗粒度，提币接口第 8 周再细化）：日志/补拉/游标类 → `log:query`；充值地址类 → `deposit:read`；其余链上查询 → `chain:read`。
+- scope 口径（粗粒度，提币接口第 8 周再细化）：日志/补拉/游标类 → `log:query`；充值地址类 → `deposit:read`；账本 POST → `ledger:write`、账本 GET → `ledger:read`；其余链上查询 → `chain:read`。
 - 密钥：`security.jwt.secret` 为 Base64 编码、原始字节 ≥ 32B（HS256 强校验），生产经环境变量注入；本地可用 `JwtTokenProvider.generateSecret()` 生成临时密钥。
 - **签发接口** `POST /api/auth/token`（`AuthController`，仅 `enabled=true` 时注册）：带请求头 `X-Issuer-Key`=`security.jwt.issuer-access-key` 调用，返回 `TokenVO{token,scope,expiresInSecond}`；
   放在 `/api/chain/**` 之外避免“签发接口自己也要 token”的自拦；未配口令返回 503（安全默认，防任意铸造），仅供本地/联调，生产应关闭。
@@ -559,6 +621,61 @@ web3:
 **3. HMAC 请求签名**（外部调用方/Webhook 验源）：本周仅出设计文档 [docs/HMAC签名方案设计.md](docs/HMAC签名方案设计.md)，
 代码实现排期第 8 周提币接口安全部分；签名串规则与 nonce 防重放思路需本周理解到位（第 5.5 周“接口结果不确定”会复用请求唯一标识概念）。
 
+### 5.15 复式账本（第 2 周）
+
+把“余额”从业务代码里的随手加减，收敛为“分录是事实、余额是物化视图”：
+
+- **表结构**：`account`（用户 × 类型 × 币种，`available/frozen/version`）、`ledger_entry`（一笔业务一组，`uk_biz(biz_type,biz_no)` 幂等）、
+  `ledger_posting`（一账户一行，`balance_after` 审计）。账本两表只 INSERT，不 UPDATE/DELETE；冲正写反向组，`reverse_of` 指向原 entry。
+- **记账五步**（`LedgerServiceImpl.post`）：按币种校验借贷平衡 → 按 account_id 升序 `SELECT ... FOR UPDATE` → 同事务写 entry/posting →
+  逐账户乐观锁 `WHERE id=? AND version=?` 回写 → `@Transactional(rollbackFor=Exception.class)` 全组回滚。
+- **四类业务 + 冲正**：`LedgerGroupFactory` 纯函数生成分录（充值 / 冻结 / 成交本金+手续费 / 解冻），`LedgerService` 的场景方法各自开事务；
+  冲正允许负余额（更正既成事实优先于余额非负），并禁止对 REVERSE 再冲正。
+- **连接池隔离**：`com.ray.web3.ledger.mapper` 走 `ledgerDataSource` + `ledgerTransactionManager`，业务池被打满时记账仍能拿到连接。
+- **HTTP 入口**：`LedgerController` 暴露 `/api/ledger/{post,deposit,freeze,settle,unfreeze,reverse}`，POST 需要 `ledger:write`；
+  请求形状由 DTO Bean Validation 校验，余额/账户等业务不变量仍在服务层。
+- **联调**：`sql/ledger_test_data.sql` 提供固定账户 ID（900001/900101 等）；`scripts/ledger-api-demo.sh` / `.http` 一键跑完四场景 + 冲正 + 幂等。
+
+### 5.16 Outbox 消息投递与 Kafka 消费者（第 3 周）
+
+**问题**：充值落库后直接发 MQ 是双写——先发消息后落库，库回滚会让下游凭空入账；先落库后发消息，进程在发送前挂掉消息永久丢。
+Outbox 把“业务写入 + 消息写入”压进同一个本地事务，再把发送拆成可重试的独立环节。
+
+**链路**：
+
+```text
+Transfer 事件（WS / 补拉）
+  → DepositRoutingServiceImpl.route()  ── 同一本地事务 ──┐
+        ├─ INSERT deposit_record                         │
+        └─ INSERT outbox_message(status=NEW)             │
+                                                         ▼
+              OutboxDispatcher（@Scheduled，SELECT ... FOR UPDATE SKIP LOCKED）
+                ├─ 成功：status=SENT，回填 deposit_record.notify_status=SENT
+                └─ 失败：retry_count+1 + 指数退避，超限 status=FAILED
+                                                         │
+                              OutboxPublisher（redis 默认 / kafka）
+                                                         ▼
+                              DepositOutboxConsumer（enable.auto.commit=false）
+                                ├─ INSERT IGNORE consumer_biz(biz_no) → 0 则 ack 跳过
+                                └─ 首次：解析 userId/currency → LedgerService.deposit()
+```
+
+- **投递器**：`OutboxDispatcher` 用 `FOR UPDATE SKIP LOCKED` 多实例抢批次；扫描、发送、改状态在同一事务内。
+  状态机 `NEW → SENT`（成功）/ `NEW → NEW`（失败重试，`retry_count+1`、`next_retry_at` 指数退避）/ `NEW → FAILED`（超限）。
+  `next_retry_at` 全部用数据库时钟（`NOW(3)`、`TIMESTAMPADD`），避免 JVM/MySQL 时区不一致。
+- **通道切换**：`web3.outbox.transport=redis`（默认，发 `deposit_channel`，兼容旧行为）或 `kafka`（发 `deposit-outbox`，并启用消费者）。
+  两个 Publisher 用 `@ConditionalOnProperty` 互斥；`transport` 为空/未知值时两个都不加载，启动会因缺 `OutboxPublisher` 失败。
+- **Kafka 消费者**：`spring.kafka.consumer.enable-auto-commit=false` + `listener.ack-mode=manual_immediate`，
+  只有 `ack.acknowledge()` 才提交 offset；处理失败不 ack，重启/rebalance 后重投。
+- **幂等三层**：Outbox 以 `(biz_type, biz_no)` 标识业务消息，充值路由对纯重放不再补消息（并发冲突回读仍可能补，宁重不漏）；
+  消费端 `consumer_biz.biz_no` 主键挡住重复投递；账本 `ledger_entry.uk_biz(DEPOSIT, deposit_no)` 挡住重复入账。
+- **账户解析**：消费者按 payload 的 `userId + currency` 查 `account`（默认 SPOT），平台代收负债账户由
+  `web3.deposit.consumer.platform-liability-account-id` 配置；HOT 钱包没有 `userId`，不直接入用户账本。
+- **本地跑通**：`docker compose up -d kafka`（KRaft 单节点）→ 执行 `schema.sql` / `ledger_test_data.sql` / `kafka_demo_data.sql` →
+  应用设置 `WEB3_OUTBOX_TRANSPORT=kafka`、`KAFKA_BOOTSTRAP_SERVERS`、`WEB3_PLATFORM_LIABILITY_ACCOUNT_ID`；
+  关键三行日志与断线重连/幂等验证见 [file/第三阶段/Day5-6消费者与本地跑通.md](file/第三阶段/Day5-6消费者与本地跑通.md)。
+- **至少一次**：投递器发成功但改状态前宕机 → 重启重发；消费端 `consumer_biz` + 账本 `uk_biz` 保证重复无害。
+
 ---
 
 ## 六、快速开始
@@ -570,17 +687,31 @@ web3:
 | Maven | 3.9.x |
 | MySQL | 8.x，执行 `sql/schema.sql` |
 | Redis | 7.x（本地无密码时勿配置 `password` 行，含空串，否则 Redisson 仍发 AUTH 报错） |
+| Kafka | 3.x（本地 `docker compose up -d kafka`，KRaft 单节点，无 ZooKeeper） |
 | Infura 账号 | 创建 Project 获取 `projectId` |
 
 ### 6.2 数据库初始化
 ```bash
 mysql -u root -p < sql/schema.sql
+# 可选：账本/消费者演示账户（固定 account.id）
+mysql -u root -p < sql/ledger_test_data.sql
+# 可选：Kafka 端到端演示充值地址（USER 钱包，映射 user_id=10001）
+mysql -u root -p < sql/kafka_demo_data.sql
 ```
-脚本会建 `web3_backend` 库与四张表：`block_sync_state`（补拉游标）、`transfer_event_log`（Transfer 流水）、
-`deposit_wallet`（平台热钱包/用户充值地址）、`deposit_record`（充值入账记录）。
-已跑过旧版本脚本的库，补执行 `transfer_event_log`（或模块四新增的两张充值表）建表语句即可。
+脚本会建 `web3_backend` 库与全部表：`block_sync_state`、`transfer_event_log`、`deposit_wallet`、`deposit_record`、
+`withdraw_record`、`wallet_nonce`、`account`、`account_transfer`、`perp_position`、`ledger_entry`、`ledger_posting`、
+`outbox_message`、`consumer_biz`。`schema.sql` 使用 `CREATE TABLE IF NOT EXISTS`，已存在的库重跑只会补建缺失的新表。
 
-### 6.3 编译打包（PowerShell）
+### 6.3 启动本地 Kafka（第 3 周，可选）
+```bash
+docker compose up -d kafka
+docker compose ps                 # 等待 STATUS 变为 healthy
+docker compose logs -f kafka      # 看到 Kafka Server started
+```
+宿主机应用连 `localhost:9092`；如果应用也跑在 compose 网络里，把 `KAFKA_BOOTSTRAP_SERVERS` 改成 `kafka:9092`。
+默认 `web3.outbox.transport=redis`，不会启动 Kafka 消费者；验证 Kafka 链路时设置 `WEB3_OUTBOX_TRANSPORT=kafka`。
+
+### 6.4 编译打包（PowerShell）
 ```powershell
 # 注入 Infura 项目 ID
 $env:INFURA_PROJECT_ID = "你的projectId"
@@ -588,6 +719,11 @@ $env:INFURA_PROJECT_ID = "你的projectId"
 # 如需经本地代理访问 Infura（HTTP RPC 与 wss 共用这两个变量；本机开 Clash 时需要）
 $env:WEB3_PROXY_HOST = "127.0.0.1"
 $env:WEB3_PROXY_PORT = "7890"
+
+# 第 3 周 Kafka 链路（默认 redis 通道不需要这三项）
+$env:WEB3_OUTBOX_TRANSPORT = "kafka"
+$env:KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
+$env:WEB3_PLATFORM_LIABILITY_ACCOUNT_ID = "900101"
 
 # 离线单测（不依赖真实节点/DB/Redis）
 mvn test
@@ -597,7 +733,7 @@ mvn clean package -DskipTests
 java -jar target/web3-backend-1.0.0-SNAPSHOT.jar
 ```
 
-### 6.4 验证入口
+### 6.5 验证入口
 | 入口 | 地址 |
 |---|---|
 | 链上状态 | `GET http://localhost:8080/api/chain/status` |
@@ -610,7 +746,10 @@ java -jar target/web3-backend-1.0.0-SNAPSHOT.jar
 | 入库对账 | `GET http://localhost:8080/api/chain/logs/transfer/saved-count/{contract}?fromBlock=&toBlock=` |
 | 充值地址配置 | `GET` / `POST http://localhost:8080/api/chain/deposit/wallets`（停用：`DELETE /deposit/wallets/{address}`） |
 | 充值地址刷新 | `POST http://localhost:8080/api/chain/deposit/wallets/refresh` |
-| 下游充值消息 | `redis-cli SUBSCRIBE deposit_channel`（入账后收到 `PENDING_CONFIRM` 消息） |
+| 下游充值消息（redis 通道） | `redis-cli SUBSCRIBE deposit_channel`（Outbox 投递后收到 `PENDING_CONFIRM` 消息） |
+| Kafka 投递（kafka 通道） | `docker exec -it web3-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic deposit-outbox --from-beginning` |
+| Outbox 状态 | SQL：`SELECT id, biz_no, status, retry_count, next_retry_at FROM outbox_message ORDER BY id DESC LIMIT 5;` |
+| 消费幂等 | SQL：`SELECT * FROM consumer_biz ORDER BY consumed_at DESC LIMIT 5;` |
 | Swagger UI | `http://localhost:8080/swagger-ui.html` |
 | OpenAPI 描述 | `http://localhost:8080/v3/api-docs` |
 | 健康检查 | `http://localhost:8080/actuator/health` |
@@ -627,6 +766,18 @@ java -jar target/web3-backend-1.0.0-SNAPSHOT.jar
 `WARN … 分段 [18000000,18000999] 命中节点上限，跨度 1000 → 587 后续拉` → `INFO 补拉分页 …` → `INFO 历史补拉完成 … pages=2`，
 且 `SELECT latest_scanned_block FROM block_sync_state WHERE chain_id=1 AND contract_address='0xdac1…'` 与
 `redis-cli get web3:sync:cursor:1:0xdac1…` 均等于请求的 `toBlock`。
+
+Kafka 链路跑通的标志（`WEB3_OUTBOX_TRANSPORT=kafka`）：
+
+```text
+[deposit] 充值路由 source=STREAM events=1 matched=1 inserted=1 outbox=1
+[outbox] 投递成功 id=1 bizType=DEPOSIT bizNo=DP... retry=0
+[consumer] 账本入账成功 depositNo=DP... entryNo=LE... userAccountId=900001 amount=100.000000 USDT
+[consumer] 已 ack depositNo=DP... entryNo=LE... partition=0 offset=0
+```
+
+对应 `deposit_record.notify_status=SENT`、`consumer_biz` 有一行、`ledger_entry` 有一笔 `DEPOSIT`。
+完整步骤、幂等重投与 WS 断线重连验证见 [file/第三阶段/Day5-6消费者与本地跑通.md](file/第三阶段/Day5-6消费者与本地跑通.md)。
 
 开启鉴权与入口限流后的验证（PowerShell，默认关需先置 `API_JWT_ENABLED=true` / `API_RATE_LIMIT_ENABLED=true` 并配好密钥）：
 ```powershell
@@ -657,6 +808,7 @@ Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:TOKEN" } http://local
 | `spring.datasource.url` | `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_DATABASE` | `localhost:3306/web3_backend` | MySQL 连接 |
 | `spring.datasource.username/password` | `MYSQL_USERNAME` / `MYSQL_PASSWORD` | `root` / `root` | 账号密码 |
 | `spring.data.redis.host/port/database` | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DATABASE` | `localhost:6379:0` | Redis 连接 |
+| `spring.datasource.ledger.*` | `MYSQL_LEDGER_*` | 与业务库相同 | 账本独立连接池（`ledgerDataSource` + `ledgerTransactionManager`），见 [5.15](#515-复式账本第-2-周) |
 | `mybatis-plus.*` | — | 下划线转驼峰、`id-type: auto` | ORM 行为 |
 | `web3.infura.project-id` | `INFURA_PROJECT_ID` | 空 | Infura Project ID |
 | `web3.infura.http-url` | — | 主网 URL | HTTP RPC 地址 |
@@ -686,10 +838,27 @@ Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:TOKEN" } http://local
 | `web3.deposit.hot-wallets` | — | 空（示例注释一个地址） | 配置中心热钱包：key=地址，value=币种符号（留空=不限合约）；与 `deposit_wallet` 表取并集，同地址以 DB 为准 |
 | `web3.deposit.wallet-cache-refresh-ms` | `WEB3_DEPOSIT_WALLET_TTL_MS` | 30000 | 充值地址缓存回源间隔（路由按内存索引匹配，避免每事件一次 SELECT） |
 | `web3.deposit.confirm-threshold` | `WEB3_DEPOSIT_CONFIRM_THRESHOLD` | 12 | 确认阈值（区块数），随消息下发供下游判断最终确定性；0=不设置 |
+| `web3.deposit.consumer.platform-liability-account-id` | `WEB3_PLATFORM_LIABILITY_ACCOUNT_ID` | 0（yml 本地为 900101） | 消费者记账用的平台代收负债账户 ID；生产必须覆盖 |
+| `web3.deposit.consumer.user-account-type` | `WEB3_DEPOSIT_USER_ACCOUNT_TYPE` | SPOT | 充值入账的用户账户类型 |
+| `web3.outbox.enabled` | `WEB3_OUTBOX_ENABLED` | true | 是否启用 Outbox 定时投递器 |
+| `web3.outbox.transport` | `WEB3_OUTBOX_TRANSPORT` | redis | 投递通道：`redis`（默认）/`kafka`；为空或未知值会导致缺 `OutboxPublisher` 启动失败 |
+| `web3.outbox.dispatch-interval-ms` | `WEB3_OUTBOX_DISPATCH_INTERVAL_MS` | 1000 | 投递轮询间隔（ms） |
+| `web3.outbox.batch-size` | `WEB3_OUTBOX_BATCH_SIZE` | 200 | 单轮扫描条数（`LIMIT ? FOR UPDATE SKIP LOCKED`） |
+| `web3.outbox.max-retries` | `WEB3_OUTBOX_MAX_RETRIES` | 8 | 最大重试次数，达到后置 `FAILED` |
+| `web3.outbox.retry-base-seconds` | `WEB3_OUTBOX_RETRY_BASE_SECONDS` | 5 | 首次失败等待秒数，之后翻倍 |
+| `web3.outbox.retry-max-seconds` | `WEB3_OUTBOX_RETRY_MAX_SECONDS` | 300 | 退避封顶秒数 |
+| `web3.outbox.kafka.topic` | `WEB3_OUTBOX_KAFKA_TOPIC` | deposit-outbox | Kafka 投递 topic |
+| `web3.outbox.kafka.partitions/replicas` | `WEB3_OUTBOX_KAFKA_PARTITIONS` / `WEB3_OUTBOX_KAFKA_REPLICAS` | 1/1 | topic 分区/副本（本地单节点） |
+| `web3.outbox.kafka.send-timeout-seconds` | `WEB3_OUTBOX_KAFKA_SEND_TIMEOUT_SECONDS` | 5 | 等待 broker ack 的超时（秒） |
+| `spring.kafka.bootstrap-servers` | `KAFKA_BOOTSTRAP_SERVERS` | localhost:9092 | Kafka 地址 |
+| `spring.kafka.consumer.group-id` | `KAFKA_CONSUMER_GROUP` | web3-outbox | 消费组 |
+| `spring.kafka.consumer.enable-auto-commit` | — | false | 手动 ack 的前提 |
+| `spring.kafka.listener.ack-mode` | — | manual_immediate | `ack.acknowledge()` 后立即提交 offset |
+| `spring.kafka.producer.acks` | — | all | 等待所有 ISR 确认 |
 | `resilience4j.retry/circuitbreaker.instances.rpc` | — | 3 次 / 500ms，窗口 20、阈值 50%、开路 30s | 链上查询容错 |
 | `resilience4j.retry/circuitbreaker.instances.rpc-segment` | — | 5 次 / 指数退避 ×2 + 抖动 0.5，熔断同上 | 单段 `eth_getLogs` 容错 |
 | `resilience4j.ratelimiter.instances.rpc-segment` | — | 5 次/秒，等待上限 5s | 主动平滑 RPC 吞吐，避免 Infura 429 |
-| `security.jwt.enabled` | `API_JWT_ENABLED` | false | 是否给 `/api/chain/**` 挂 JWT 鉴权拦截器（见 [5.14](#514-对外-api-安全jwt-鉴权--入口令牌桶第-2-周打底)） |
+| `security.jwt.enabled` | `API_JWT_ENABLED` | false | 是否给 `/api/chain/**` 与 `/api/ledger/**` 挂 JWT 鉴权拦截器（见 [5.14](#514-对外-api-安全jwt-鉴权--入口令牌桶第-2-周打底)） |
 | `security.jwt.secret` | `API_JWT_SECRET` | 空 | Base64 HS256 密钥（原始字节 ≥32B），enabled=true 时必填；生产走环境变量 |
 | `security.jwt.ttl-seconds` | `API_JWT_TTL` | 600 | 签发 JWT 有效期（秒），内部服务间建议 5-15 分钟短时效 |
 | `security.jwt.clock-skew-seconds` | `API_JWT_SKEW` | 30 | 校验允许的时钟偏差（秒），多机部署防轻微 clock skew 误杀 |
@@ -744,13 +913,14 @@ A：把 `WEB3_BACKFILL_MAX_BLOCKS` 设为正数（如 10000）限幅，单次只
 下次用同一 `fromBlock` 重新调用会从游标自动接着跑，无需人工记位。
 
 **Q：充值会重复入账吗？下游会不会收到两条同样消息？**
-A：不会。`deposit_record` 上 `(chain_id, transaction_hash, log_index)` 唯一键 + `INSERT IGNORE`，只有真正新增的行才发 `deposit_channel`，
-重连重放、补拉分页重叠、实时与补拉双写都只通知一次；消息体带 `depositNo`，下游可按此再做一层幂等。验证：重跑同一补拉区间，
-日志里 `matched>0` 而 `inserted=0`、`published=0`，`SELECT COUNT(*) FROM deposit_record` 不变。
+A：入账不会重复，通知可能重复。`deposit_record` 唯一键 + `INSERT IGNORE` 保证重放/重叠只落一条；
+新增行在同一事务写 `outbox_message`，投递器是“至少一次”（发成功但改状态前宕机 = 重发），
+消费端 `consumer_biz.biz_no` 主键和账本 `uk_biz(DEPOSIT, deposit_no)` 兜底，重复消息直接 ack 或返回原分录。
+验证：重跑同一补拉区间 `inserted=0` 且不新增 outbox；重复消费日志出现 `[consumer] 幂等命中，跳过`。
 
-**Q：Redis 挂了会不会丢充值？**
-A：不会丢入账，只会暂时收不到通知。先落库再发布，发布失败只把 `notify_status` 置 `FAILED`（充值行已提交），
-后续按 `notify_status='FAILED'` 补偿重发即可；而路由自身报错不会拖垮实时订阅与补拉（流水已入库，重跑区间可补齐）。
+**Q：Redis/Kafka 挂了会不会丢充值？**
+A：不会丢。`deposit_record` 与 `outbox_message` 同事务落库，投递器发送失败只累计 `retry_count` 并按指数退避，
+恢复后自动续投；`notify_status` 只是投递结果观测字段。投递器停掉时业务照常落库，消息留在 outbox 等恢复。
 
 **Q：热钱包地址加了却不生成充值记录？**
 A：先看路由索引里有没有它：`curl http://localhost:8080/api/chain/deposit/wallets`（或先调 `POST /deposit/wallets/refresh`）。
@@ -783,3 +953,19 @@ A：可能是“连接活着但节点不推数据”的僵尸态。引擎的 new
 **Q：定时自动核对对新合约一声不吹地跳过了？**
 A：设计如此。无游标的合约默认不自动从创世块开扫（`auto-from-block=-1`），日志会告警提示先手动补拉建立游标；
 想直接接管就把 `WEB3_BACKFILL_AUTO_FROM_BLOCK` 设为该代币部署块号（或 0）。
+
+**Q：启动报找不到 `OutboxPublisher` Bean？**
+A：`web3.outbox.transport` 只接受 `redis` 或 `kafka`。属性缺失时默认 Redis；写成空串或其它值会导致
+`RedisOutboxPublisher`（`havingValue=redis, matchIfMissing=true`）和 `KafkaOutboxPublisher`（`havingValue=kafka`）都不匹配。
+
+**Q：Kafka 消费者一直重投 / 没有账本入账？**
+A：看 `[consumer] 充值入账失败，不 ack 等待重投` 的异常。常见原因：`web3.deposit.consumer.platform-liability-account-id`
+未配置或账户不存在；用户账户不存在（payload 的 `userId/currency` 与 `account` 表不匹配）；HOT 钱包没有 `userId`，不能直接入用户账本。
+修好后重启应用或等待 rebalance 重投；账本按 `depositNo` 幂等，不会重复加钱。
+
+**Q：Kafka 容器报 `advertised.listeners cannot use the nonroutable meta-address 0.0.0.0`？**
+A：KRaft 合并模式下 `KAFKA_ADVERTISED_LISTENERS` 必须同时声明 `CONTROLLER://...`（本项目的 `docker-compose.yml` 已包含），
+且单节点内部 topic 副本数必须为 1。
+
+**Q：`docker compose ps` 一直显示 `health: starting`？**
+A：健康检查每次都会起一个 `kafka-topics.sh` JVM，5s 容易超时；compose 已把 `timeout` 调到 15s，等 20~30s 再看。
