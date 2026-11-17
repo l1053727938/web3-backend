@@ -115,17 +115,17 @@ web3:
   # ============ WebSocket 实时订阅（newHeads & logs）============
   # 默认关闭，需要时打开 enabled（本地 Anvil 或 Infura WS 端点）
   websocket:
-    enabled: ${WEB3_WS_ENABLED:false}
+    enabled: ${WEB3_WS_ENABLED:true}
     # Anvil: ws://127.0.0.1:8545   Infura: wss://mainnet.infura.io/ws/v3/{projectId}
-#    url: ${WEB3_WS_URL:ws://127.0.0.1:8545}
+    url: ${WEB3_WS_URL:ws://127.0.0.1:8545}
 #    url: wss://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
 #    url: wss://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
-    url: wss://mainnet.infura.io/ws/v3/${INFURA_PROJECT_ID:}
+#    url: wss://mainnet.infura.io/ws/v3/${INFURA_PROJECT_ID:}
 #    url: wss://sepolia.infura.io/ws/v3/${INFURA_PROJECT_ID:}
     # wss 代理：底层 Java-WebSocket 不读系统代理/JVM 代理参数，必须在此显式配置（留空则直连）
 #    proxy-host: ${WEB3_PROXY_HOST:127.0.0.1}
 #    proxy-port: ${WEB3_PROXY_PORT:7890}
-    subscribe-new-heads: false
+    subscribe-new-heads: true
     # 监听 Transfer 日志的合约地址，多个用逗号分隔；留空则监听全链 Transfer（量大慎用）
     watch-contracts: ${WEB3_WATCH_CONTRACTS:0xdac17f958d2ee523a2206206994597c13d831ec7,0x5FbDB2315678afecb367f032d93F642f64180aa3}
 #    watch-contracts: ${WEB3_WATCH_CONTRACTS:}
@@ -176,7 +176,7 @@ web3:
   outbox:
     enabled: ${WEB3_OUTBOX_ENABLED:true}
     # 投递通道：redis=Redis 频道（默认，保持旧行为）；kafka=Kafka 投递并启用消费者入账
-    transport: ${WEB3_OUTBOX_TRANSPORT:redis}
+    transport: ${WEB3_OUTBOX_TRANSPORT:kafka}
     # 轮询间隔(ms)：越小延迟越低，但空轮询越多
     dispatch-interval-ms: ${WEB3_OUTBOX_DISPATCH_INTERVAL_MS:1000}
     # 单轮扫描条数：对应 SELECT ... LIMIT ? FOR UPDATE SKIP LOCKED
