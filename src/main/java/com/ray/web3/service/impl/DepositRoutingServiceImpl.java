@@ -241,8 +241,9 @@ public class DepositRoutingServiceImpl implements DepositRoutingService {
         record.setFromAddress(event.from());
         record.setToAddress(wallet.getAddress());
         record.setWalletType(wallet.getWalletType());
+        // userId 只来自钱包配置：USER 地址在保存时强制非空；HOT 是平台归集地址，没有归属用户（保持 null）
         record.setUserId(wallet.getUserId());
-        record.setCurrency(wallet.getCurrency());
+        record.setCurrency(resolveCurrency(wallet, event.contract()));
         record.setRawValue(event.rawValue().toString());
         record.setDisplayValue(event.displayValue());
         record.setDecimals(event.decimals());
@@ -272,6 +273,28 @@ public class DepositRoutingServiceImpl implements DepositRoutingService {
                 depositProperties.getConfirmThreshold(),
                 record.getEventSource(),
                 record.getCreatedAt() != null ? record.getCreatedAt() : LocalDateTime.now());
+    }
+
+    /**
+     * 币种解析：优先用钱包上配置的 currency；没有时按事件合约地址查 {@code web3.deposit.token-symbols} 兜底。
+     * <p>
+     * 典型场景：配置中心热钱包 value 留空（不限币种），只有事件到达时才知道收到的是哪个币。
+     * 都查不到时返回 null——不能让代码猜一个币种写进充值记录，下游会因缺少 currency 拒绝入账，
+     * 这里留日志便于补齐映射，而不是制造一条“看起来正常但币种错误”的记录。
+     */
+    private String resolveCurrency(DepositWallet wallet, String contract) {
+        if (wallet.getCurrency() != null && !wallet.getCurrency().isBlank()) {
+            return wallet.getCurrency().trim();
+        }
+        if (contract != null && !contract.isBlank()) {
+            String symbol = depositProperties.getTokenSymbols().get(contract.trim().toLowerCase());
+            if (symbol != null && !symbol.isBlank()) {
+                return symbol.trim();
+            }
+        }
+        log.warn("[deposit] 充值币种未配置，currency 将为空: address={} type={} contract={}",
+                wallet.getAddress(), wallet.getWalletType(), contract);
+        return null;
     }
 
     /**

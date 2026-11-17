@@ -115,12 +115,12 @@ web3:
   # ============ WebSocket 实时订阅（newHeads & logs）============
   # 默认关闭，需要时打开 enabled（本地 Anvil 或 Infura WS 端点）
   websocket:
-    enabled: ${WEB3_WS_ENABLED:false}
+    enabled: ${WEB3_WS_ENABLED:true}
     # Anvil: ws://127.0.0.1:8545   Infura: wss://mainnet.infura.io/ws/v3/{projectId}
-#    url: ${WEB3_WS_URL:ws://127.0.0.1:8545}
+    url: ${WEB3_WS_URL:ws://127.0.0.1:8545}
 #    url: wss://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
 #    url: wss://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}
-    url: wss://mainnet.infura.io/ws/v3/${INFURA_PROJECT_ID:}
+#    url: wss://mainnet.infura.io/ws/v3/${INFURA_PROJECT_ID:}
 #    url: wss://sepolia.infura.io/ws/v3/${INFURA_PROJECT_ID:}
     # wss 代理：底层 Java-WebSocket 不读系统代理/JVM 代理参数，必须在此显式配置（留空则直连）
 #    proxy-host: ${WEB3_PROXY_HOST:127.0.0.1}
@@ -157,6 +157,12 @@ web3:
     # ⚠ 主网热钱包充值密集，建议用 contract 限定币种（如 USDT 合约地址），避免全量 Transfer 都生成充值记录
     hot-wallets:
       "0x70997970c51812dc3a010c7d01b50e0d17dc79c8": ""
+    # 合约 → 币种符号兜底（钱包没配 currency 时按到账合约反查；key 大小写不敏感）
+    # 配置中心热钱包 value 留空 = 不限币种，只有事件到达时才知道是哪个币
+    token-symbols:
+      "0x5fbdb2315678afecb367f032d93f642f64180aa3": "USDT"
+      "0xdac17f958d2ee523a2206206994597c13d831ec7": "USDT"
+      "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": "USDC"
     # 充值地址缓存回源间隔(ms)：路由按内存索引匹配，到期才回源 DB，避免每个事件打一次 SELECT
     wallet-cache-refresh-ms: ${WEB3_DEPOSIT_WALLET_TTL_MS:30000}
     # 确认阈值(区块数)：写入下游消息供账务判断最终确定性，0=不设置
@@ -176,7 +182,7 @@ web3:
   outbox:
     enabled: ${WEB3_OUTBOX_ENABLED:true}
     # 投递通道：redis=Redis 频道（默认，保持旧行为）；kafka=Kafka 投递并启用消费者入账
-    transport: ${WEB3_OUTBOX_TRANSPORT:redis}
+    transport: ${WEB3_OUTBOX_TRANSPORT:kafka}
     # 轮询间隔(ms)：越小延迟越低，但空轮询越多
     dispatch-interval-ms: ${WEB3_OUTBOX_DISPATCH_INTERVAL_MS:1000}
     # 单轮扫描条数：对应 SELECT ... LIMIT ? FOR UPDATE SKIP LOCKED
@@ -193,6 +199,15 @@ web3:
       replicas: ${WEB3_OUTBOX_KAFKA_REPLICAS:1}
       # 单条消息等待 broker 确认的超时(秒)，超时按投递失败退避
       send-timeout-seconds: ${WEB3_OUTBOX_KAFKA_SEND_TIMEOUT_SECONDS:5}
+
+  # ============ 用户业务（第 3 周）：注册 + 充值地址分配 ============
+  user:
+    # BIP39 主助记词。⚠ 默认值是 Anvil/Hardhat 公开助记词，仅限本地联调；
+    # 泄露即所有用户充值地址的私钥泄露，生产必须用 WEB3_USER_HD_MNEMONIC 注入。
+    hd-mnemonic: ${WEB3_USER_HD_MNEMONIC:test test test test test test test test test test test junk}
+    hd-passphrase: ${WEB3_USER_HD_PASSPHRASE:}
+    # 派生序号：index = userId + offset。默认 1000，避开 Anvil 默认测试账号（index 0-9）
+    derivation-offset: ${WEB3_USER_HD_OFFSET:1000}
 
   # ============ 模块五：提币发交易（第 3 周：Nonce 管理/Gas 估算/离线签名/广播）============
   # 默认关闭；打开前必须用环境变量注入热钱包私钥（仅测试网密钥可直接写），私钥绝不下发节点、只本地签名

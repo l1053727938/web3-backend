@@ -24,6 +24,13 @@ public interface DepositWalletService {
     /** 当前生效的全部充值地址配置（配置中心 + 数据库，调试/验收用） */
     List<DepositWallet> activeWallets();
 
+    /**
+     * 查用户在该链上已分配的专属充值地址，未分配返回 null。
+     * <p>
+     * 走 DB 而不是缓存：注册/查询要求强一致，缓存只服务高频的“按地址反查用户”。
+     */
+    DepositWallet findUserWallet(Long chainId, long userId);
+
     /** 强制立即回源刷新缓存（新增/停用地址后无需等 TTL） */
     void invalidateCache();
 

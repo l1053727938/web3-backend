@@ -23,4 +23,14 @@ public interface DepositWalletMapper extends BaseMapper<DepositWallet> {
             WHERE chain_id = #{chainId} AND status = 1
             """)
     List<DepositWallet> selectActiveByChain(@Param("chainId") Long chainId);
+
+    /**
+     * 查用户在某条链上的专属充值地址（{@code uk_chain_user} 保证最多一行）
+     */
+    @Select("""
+            SELECT * FROM deposit_wallet
+            WHERE chain_id = #{chainId} AND wallet_type = 'USER' AND user_id = #{userId}
+            LIMIT 1
+            """)
+    DepositWallet selectUserWallet(@Param("chainId") Long chainId, @Param("userId") String userId);
 }

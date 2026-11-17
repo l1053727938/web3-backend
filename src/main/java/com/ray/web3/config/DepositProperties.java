@@ -27,9 +27,35 @@ public class DepositProperties {
      */
     private Map<String, String> hotWallets = new LinkedHashMap<>();
 
+    /**
+     * 合约 → 币种符号兜底表（key 为合约地址，大小写不敏感，内部统一小写）。
+     * <p>
+     * 用于钱包配置本身没有 currency 的场景，典型是「不限合约」的配置中心热钱包：
+     * 保存钱包时不知道会收到哪个币，只有事件到达时才能按 contract 反查符号。
+     * 命中优先级：{@code deposit_wallet.currency} → 本表 → 空（下游会拒绝入账）。
+     */
+    private Map<String, String> tokenSymbols = new LinkedHashMap<>();
+
     /** 充值地址缓存刷新间隔（毫秒）：到期后下一次路由触发回源，避免每个事件打一次 DB */
     private long walletCacheRefreshMs = 30_000L;
 
     /** 确认阈值（区块数）：链上最新高度 - 入账高度 ≥ 该值时由确认任务置为已入账；0=不做确认推进 */
     private long confirmThreshold = 12L;
+
+    /**
+     * 合约地址大小写不敏感：Spring 绑定后统一转小写，避免配置里写成混合大小写导致反查漏命中。
+     * <p>
+     * 自定义 setter 覆盖 Lombok 生成的版本，保证任何来源（yml / 配置中心）写入都经过归一化。
+     */
+    public void setTokenSymbols(Map<String, String> tokenSymbols) {
+        Map<String, String> normalized = new LinkedHashMap<>();
+        if (tokenSymbols != null) {
+            tokenSymbols.forEach((contract, symbol) -> {
+                if (contract != null && !contract.isBlank()) {
+                    normalized.put(contract.trim().toLowerCase(), symbol);
+                }
+            });
+        }
+        this.tokenSymbols = normalized;
+    }
 }

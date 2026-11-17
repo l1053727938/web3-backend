@@ -95,10 +95,13 @@
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
-        <!-- Spring Kafka：第 3 周 Day 5-6 Outbox → Kafka → 消费者入账 -->
+        <!-- Spring Kafka：第 3 周 Day 5-6 Outbox → Kafka → 消费者入账
+             ⚠ 必须用 starter：Boot 4 把自动配置拆到了独立模块 spring-boot-kafka，
+             只引 org.springframework.kafka:spring-kafka 能编译（有 KafkaTemplate 类），
+             但不会注册 KafkaAutoConfiguration，运行时注入 KafkaTemplate 直接报 no bean -->
         <dependency>
-            <groupId>org.springframework.kafka</groupId>
-            <artifactId>spring-kafka</artifactId>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka</artifactId>
         </dependency>
 
         <!-- Redisson：分布式锁（提币防重、区块扫描互斥） -->

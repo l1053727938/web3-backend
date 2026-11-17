@@ -55,6 +55,11 @@ public class DepositWalletServiceImpl implements DepositWalletService {
     }
 
     @Override
+    public DepositWallet findUserWallet(Long chainId, long userId) {
+        return depositWalletMapper.selectUserWallet(chainId, String.valueOf(userId));
+    }
+
+    @Override
     public void invalidateCache() {
         loadedAt = 0L;
     }

@@ -2,6 +2,7 @@ package com.ray.web3.ledger.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.ray.web3.model.entity.Account;
+import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
@@ -48,6 +49,21 @@ public interface AccountMapper extends BaseMapper<Account> {
     Account selectByUserTypeCurrency(@Param("userId") long userId,
                                      @Param("accountType") String accountType,
                                      @Param("currency") String currency);
+
+    /**
+     * 幂等创建账户行：首次入账/注册时调用，命中 {@code uk_user_type_currency} 即静默跳过。
+     * <p>
+     * 初始 available/frozen 都为 0；余额只能通过账本分录变动，绝不能在这里写非零值。
+     *
+     * @return 1=新建，0=已存在
+     */
+    @Insert("""
+            INSERT IGNORE INTO `account` (user_id, account_type, currency, available, frozen, version)
+            VALUES (#{userId}, #{accountType}, #{currency}, 0, 0, 0)
+            """)
+    int insertIgnoreAccount(@Param("userId") long userId,
+                            @Param("accountType") String accountType,
+                            @Param("currency") String currency);
 
     /**
      * 乐观锁回写余额：命中 {@code (id, version)} 才算成功，返回 0 表示期间被并发事务改过，

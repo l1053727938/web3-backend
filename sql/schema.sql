@@ -36,22 +36,37 @@ CREATE TABLE IF NOT EXISTS transfer_event_log
     KEY idx_contract_block (contract_address, block_number)
 ) ENGINE = InnoDB COMMENT ='ERC-20 Transfer 事件流水';
 
+-- 用户主表（第 3 周：用户业务接入）
+-- 只存身份，不存余额/地址：余额在 account，地址在 deposit_wallet，两类事实分开演进
+CREATE TABLE IF NOT EXISTS `user`
+(
+    id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '用户ID',
+    username   VARCHAR(64)     NOT NULL COMMENT '登录名，全局唯一',
+    status     TINYINT         NOT NULL DEFAULT 1 COMMENT '1=正常，0=禁用',
+    created_at DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_username (username)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='用户主表';
+
 -- 充值地址表（REQ-BIZ-04 热钱包匹配）：平台热钱包 + 用户充值地址统一维护，实时链路与补拉链路共用
 -- 匹配按 to_address 小写等值命中，故唯一键直接落在 (chain_id, address)：同链同地址只允许一条有效配置
 CREATE TABLE IF NOT EXISTS deposit_wallet
 (
-    id            BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
-    chain_id      BIGINT      NOT NULL COMMENT '链ID，Sepolia=11155111',
-    address       VARCHAR(64) NOT NULL COMMENT '充值地址（小写）',
-    wallet_type   VARCHAR(16) NOT NULL DEFAULT 'HOT' COMMENT '地址类型：HOT=平台热钱包，USER=用户充值地址',
-    user_id       VARCHAR(64)          DEFAULT NULL COMMENT '用户标识，wallet_type=USER 时必填',
-    currency      VARCHAR(32)          DEFAULT NULL COMMENT '归属币种符号（如 USDT），仅作展示/对账',
-    contract      VARCHAR(64)          DEFAULT NULL COMMENT '限定代币合约（小写）；NULL=任意合约到账均视为该地址充值',
-    status        TINYINT     NOT NULL DEFAULT 1 COMMENT '1=启用，0=停用（停用后不再路由新充值）',
-    remark        VARCHAR(255)         DEFAULT NULL COMMENT '备注',
-    updated_at    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-    created_at    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+    chain_id         BIGINT      NOT NULL COMMENT '链ID，Sepolia=11155111',
+    address          VARCHAR(64) NOT NULL COMMENT '充值地址（小写）',
+    wallet_type      VARCHAR(16) NOT NULL DEFAULT 'HOT' COMMENT '地址类型：HOT=平台热钱包，USER=用户充值地址',
+    user_id          VARCHAR(64)          DEFAULT NULL COMMENT '用户标识，wallet_type=USER 时必填',
+    derivation_index INT                  DEFAULT NULL COMMENT 'HD 派生序号，USER 地址由 (chain, user) 唯一确定',
+    currency         VARCHAR(32)          DEFAULT NULL COMMENT '归属币种符号（如 USDT），仅作展示/对账',
+    contract         VARCHAR(64)          DEFAULT NULL COMMENT '限定代币合约（小写）；NULL=任意合约到账均视为该地址充值',
+    status           TINYINT     NOT NULL DEFAULT 1 COMMENT '1=启用，0=停用（停用后不再路由新充值）',
+    remark           VARCHAR(255)         DEFAULT NULL COMMENT '备注',
+    updated_at       DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    created_at       DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     UNIQUE KEY uk_chain_address (chain_id, address),
+    -- 一个用户一条链一个地址（HOT 的 user_id 为 NULL，MySQL 唯一索引允许多个 NULL）
+    UNIQUE KEY uk_chain_user (chain_id, wallet_type, user_id),
     KEY idx_chain_type_status (chain_id, wallet_type, status)
 ) ENGINE = InnoDB COMMENT ='平台热钱包/用户充值地址配置';
 
@@ -231,6 +246,12 @@ CREATE TABLE IF NOT EXISTS `ledger_posting` (
 --       COMMENT 'AVAILABLE/FROZEN，指明本次变动的是哪个子账' AFTER direction;
 --   若 ledger_entry 未建 uk_reverse_of（Day 5-6 冲正需要），手工执行：
 --   ALTER TABLE ledger_entry ADD UNIQUE KEY uk_reverse_of (reverse_of);
+
+-- 用户业务（第 3 周）对已有库的迁移：`user` 是新建表，直接执行上面的 DDL；
+-- deposit_wallet 已存在时需手工补列与唯一键：
+--   ALTER TABLE deposit_wallet
+--       ADD COLUMN derivation_index INT NULL COMMENT 'HD 派生序号，USER 地址由 (chain, user) 唯一确定' AFTER user_id,
+--       ADD UNIQUE KEY uk_chain_user (chain_id, wallet_type, user_id);
 
 -- 生产库账号权限：账本只增不改（配合代码侧“不提供 update/delete 方法”）
 --   GRANT SELECT, INSERT ON web3_backend.ledger_entry   TO 'ledger_app'@'%';

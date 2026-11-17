@@ -33,6 +33,9 @@ public class DepositWallet {
     /** 归属用户，walletType=USER 时非空 */
     private String userId;
 
+    /** HD 派生序号：USER 地址由 (chain_id, user_id) 唯一确定，重复分配得到同一地址 */
+    private Integer derivationIndex;
+
     /** 币种符号（展示/对账用） */
     private String currency;
 

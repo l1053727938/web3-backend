@@ -6,6 +6,7 @@ import com.ray.web3.mapper.ConsumerBizMapper;
 import com.ray.web3.model.entity.Account;
 import com.ray.web3.model.entity.LedgerEntry;
 import com.ray.web3.model.vo.DepositEventVO;
+import com.ray.web3.service.LedgerAccountService;
 import com.ray.web3.service.LedgerService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -38,6 +39,7 @@ public class DepositCreditService {
     private final ConsumerBizMapper consumerBizMapper;
     private final AccountMapper accountMapper;
     private final LedgerService ledgerService;
+    private final LedgerAccountService ledgerAccountService;
     private final ObjectMapper objectMapper;
     private final DepositConsumerProperties consumerProperties;
 
@@ -97,12 +99,16 @@ public class DepositCreditService {
         if (event.currency() == null || event.currency().isBlank()) {
             throw new IllegalStateException("充值消息缺少 currency: depositNo=" + event.depositNo());
         }
-        Account account = accountMapper.selectByUserTypeCurrency(
-                userId, consumerProperties.getUserAccountType(), event.currency());
+        String accountType = consumerProperties.getUserAccountType();
+        Account account = accountMapper.selectByUserTypeCurrency(userId, accountType, event.currency());
         if (account == null) {
-            throw new IllegalStateException("用户账户不存在: userId=" + userId
-                    + ", type=" + consumerProperties.getUserAccountType()
-                    + ", currency=" + event.currency());
+            // 懒开户：注册不跨连接池写账本表，首次入账时幂等补一行，再回读
+            ledgerAccountService.ensureAccount(userId, accountType, event.currency());
+            account = accountMapper.selectByUserTypeCurrency(userId, accountType, event.currency());
+        }
+        if (account == null) {
+            throw new IllegalStateException("用户账户不存在且开户失败: userId=" + userId
+                    + ", type=" + accountType + ", currency=" + event.currency());
         }
         return account.getId();
     }
