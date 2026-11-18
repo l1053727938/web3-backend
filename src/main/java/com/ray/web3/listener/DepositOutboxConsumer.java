@@ -3,6 +3,7 @@ package com.ray.web3.listener;
 import com.ray.web3.service.impl.DepositCreditService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.kafka.clients.consumer.CommitFailedException;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -44,6 +45,12 @@ public class DepositOutboxConsumer {
                 log.info("[consumer] 已 ack depositNo={} entryNo={} partition={} offset={}",
                         result.depositNo(), result.entryNo(), record.partition(), record.offset());
             }
+        } catch (CommitFailedException e) {
+            // 入账事务已提交，只是 offset 提交时消费组已 rebalance（本实例已被踢出组）：
+            // 消息会重投，consumer_biz 幂等表保证不会重复加钱，因此这里不是入账失败。
+            log.warn("[consumer] offset 提交失败（消费组已 rebalance），消息将重投并按幂等跳过 "
+                            + "key={} partition={} offset={}: {}",
+                    record.key(), record.partition(), record.offset(), e.getMessage());
         } catch (Exception e) {
             // 失败不 ack：offset 未提交，消息会在重启/rebalance 后重投
             log.error("[consumer] 充值入账失败，不 ack 等待重投 key={} partition={} offset={}: {}",

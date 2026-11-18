@@ -61,6 +61,15 @@ spring:
       auto-offset-reset: earliest
       # 手动 ack 的前提：关闭自动提交
       enable-auto-commit: false
+      # 单批拉取上限：rebalance 后最多重放这一批（consumer_biz 幂等兜底），
+      # 也避免一次 poll 处理过久触发 max.poll.interval.ms
+      max-poll-records: ${KAFKA_MAX_POLL_RECORDS:50}
+      # 两次 poll 最大间隔：处理大批次/慢事务时按需调大
+      max-poll-interval: ${KAFKA_MAX_POLL_INTERVAL_MS:300000}
+      # 会话超时：断点调试会把 JVM 整体暂停、心跳也停，默认 45s 会被踢出组；
+      # 需要长时间停在断点上时用 KAFKA_SESSION_TIMEOUT_MS=300000 启动
+      properties:
+        session.timeout.ms: ${KAFKA_SESSION_TIMEOUT_MS:45000}
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
     listener:

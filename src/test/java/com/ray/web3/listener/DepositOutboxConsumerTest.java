@@ -1,6 +1,7 @@
 package com.ray.web3.listener;
 
 import com.ray.web3.service.impl.DepositCreditService;
+import org.apache.kafka.clients.consumer.CommitFailedException;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -10,6 +11,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.kafka.support.Acknowledgment;
 
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -50,6 +52,19 @@ class DepositOutboxConsumerTest {
                 .thenReturn(new DepositCreditService.CreditResult("DP1", null, true));
 
         consumer.onDeposit(record(), acknowledgment);
+
+        verify(acknowledgment).acknowledge();
+    }
+
+    @Test
+    void rebalance导致offset提交失败不应误报入账失败() {
+        when(depositCreditService.credit(PAYLOAD))
+                .thenReturn(new DepositCreditService.CreditResult("DP1", "LE1", false));
+        doThrow(new CommitFailedException("group rebalanced")).when(acknowledgment).acknowledge();
+
+        // 入账已成功，只是 offset 提交失败：不向外抛异常，消息重投后由幂等表兜底
+        assertThatCode(() -> consumer.onDeposit(record(), acknowledgment))
+                .doesNotThrowAnyException();
 
         verify(acknowledgment).acknowledge();
     }
