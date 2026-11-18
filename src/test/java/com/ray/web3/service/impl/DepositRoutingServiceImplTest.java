@@ -103,6 +103,8 @@ class DepositRoutingServiceImplTest {
         assertThat(message.getBizNo()).isEqualTo("DP17000000000000001");
         assertThat(message.getStatus()).isEqualTo(OutboxConsts.Status.NEW);
         assertThat(message.getRetryCount()).isZero();
+        // HOT 钱包无归属用户：分区键回退充值单号
+        assertThat(message.getPartitionKey()).isEqualTo(message.getBizNo());
         assertThat(message.getPayload())
                 .contains("\"depositNo\":\"DP17000000000000001\"")
                 .contains("\"status\":\"PENDING_CONFIRM\"")
@@ -133,6 +135,9 @@ class DepositRoutingServiceImplTest {
 
         ArgumentCaptor<OutboxMessage> outboxCaptor = ArgumentCaptor.forClass(OutboxMessage.class);
         verify(outboxMessageMapper).insert(outboxCaptor.capture());
+        assertThat(outboxCaptor.getValue().getPartitionKey())
+                .as("USER 充值的 Kafka key 必须是 userId，保证同一用户进同一分区")
+                .isEqualTo("10001");
         assertThat(outboxCaptor.getValue().getPayload())
                 .contains("\"userId\":\"10001\"")
                 .contains("\"walletType\":\"USER\"");

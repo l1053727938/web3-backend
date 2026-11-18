@@ -87,6 +87,9 @@ class DepositRoutingOutboxTransactionTest {
         assertThat(jdbc.queryForObject("SELECT payload FROM outbox_message", String.class))
                 .contains("\"depositNo\"")
                 .contains("\"status\":\"PENDING_CONFIRM\"");
+        // HOT 钱包没有归属用户：分区键回退充值单号，保证 key 非空
+        assertThat(jdbc.queryForObject("SELECT partition_key FROM outbox_message", String.class))
+                .isEqualTo(jdbc.queryForObject("SELECT biz_no FROM outbox_message", String.class));
     }
 
     @Test
@@ -134,6 +137,7 @@ class DepositRoutingOutboxTransactionTest {
                   id BIGINT AUTO_INCREMENT PRIMARY KEY,
                   biz_type VARCHAR(32) NOT NULL,
                   biz_no VARCHAR(64) NOT NULL,
+                  partition_key VARCHAR(64),
                   payload VARCHAR(4000) NOT NULL,
                   status VARCHAR(16) NOT NULL DEFAULT 'NEW',
                   retry_count INT NOT NULL DEFAULT 0,

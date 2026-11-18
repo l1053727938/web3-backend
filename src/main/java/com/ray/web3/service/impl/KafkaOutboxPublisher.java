@@ -8,6 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -18,7 +19,8 @@ import java.util.concurrent.TimeoutException;
  * <p>
  * Outbox 投递器调用本类把消息同步发到 Kafka：
  * <ul>
- *   <li>key = {@code bizNo}（充值单号），同一业务键的消息进入同一 partition，便于排查与幂等；</li>
+ *   <li>key = {@code partitionKey}（用户维度，DEPOSIT 为 userId），同一用户的事件进入同一 partition 按序消费；
+     *       为空时回退 {@code bizNo}，兼容历史数据与其他业务；</li>
  *   <li>value = outbox_message.payload（入账当时的快照 JSON）；</li>
  *   <li>{@code .get(timeout)} 等待 broker 确认：只有真正写入 Kafka 才返回，
  *       超时/异常抛给投递器 → retry_count+1 → 退避重试；</li>
@@ -38,10 +40,12 @@ public class KafkaOutboxPublisher implements OutboxPublisher {
     @Override
     public void publish(OutboxMessage message) {
         String topic = outboxProperties.getKafka().getTopic();
+        String key = StringUtils.hasText(message.getPartitionKey())
+                ? message.getPartitionKey() : message.getBizNo();
         try {
-            kafkaTemplate.send(topic, message.getBizNo(), message.getPayload())
+            kafkaTemplate.send(topic, key, message.getPayload())
                     .get(outboxProperties.getKafka().getSendTimeoutSeconds(), TimeUnit.SECONDS);
-            log.debug("[outbox] Kafka 投递成功 topic={} bizNo={}", topic, message.getBizNo());
+            log.debug("[outbox] Kafka 投递成功 topic={} key={} bizNo={}", topic, key, message.getBizNo());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Kafka 投递被中断 topic=" + topic

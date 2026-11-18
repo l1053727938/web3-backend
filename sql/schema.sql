@@ -272,6 +272,7 @@ CREATE TABLE IF NOT EXISTS `outbox_message` (
   `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `biz_type`      VARCHAR(32)     NOT NULL                COMMENT '业务类型：DEPOSIT/WITHDRAW/MATCH 等',
   `biz_no`        VARCHAR(64)     NOT NULL                COMMENT '业务单号，消费端按此幂等',
+  `partition_key` VARCHAR(64)     NULL                    COMMENT 'Kafka 分区键：同一用户事件必须相同（通常 userId）；NULL 时投递器回退 biz_no',
   `payload`       JSON            NOT NULL                COMMENT '消息体快照，避免投递时业务表已变更',
   `status`        VARCHAR(16)     NOT NULL DEFAULT 'NEW'  COMMENT 'NEW=待投递，SENT=已投递，FAILED=重试超限',
   `retry_count`   INT             NOT NULL DEFAULT 0      COMMENT '已重试次数（上限由投递器策略决定）',

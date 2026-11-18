@@ -204,7 +204,9 @@ web3:
     # Kafka 通道参数（transport=kafka 时生效）
     kafka:
       topic: ${WEB3_OUTBOX_KAFKA_TOPIC:deposit-outbox}
-      partitions: ${WEB3_OUTBOX_KAFKA_PARTITIONS:1}
+      # 多分区才能发挥 userId 分区键的作用（同一用户进同一分区、不同用户并行）。
+      # 已存在的 topic 改这个值不会自动扩分区，需 kafka-topics.sh --alter --partitions N。
+      partitions: ${WEB3_OUTBOX_KAFKA_PARTITIONS:6}
       replicas: ${WEB3_OUTBOX_KAFKA_REPLICAS:1}
       # 单条消息等待 broker 确认的超时(秒)，超时按投递失败退避
       send-timeout-seconds: ${WEB3_OUTBOX_KAFKA_SEND_TIMEOUT_SECONDS:5}

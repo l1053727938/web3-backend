@@ -242,6 +242,9 @@ public class DepositRoutingServiceImpl implements DepositRoutingService {
      * 包含“本次新增行”与“并发冲突回读到的已存在行”：至少一次投递允许重复，
      * 消费端按 bizNo 幂等；宁重不漏，避免某些实例只写了充值行而通知永久缺失。
      * 任何一条插入/序列化失败都会抛异常，让整个事务回滚。
+     * <p>
+     * {@code partition_key} 取 userId（HOT 无归属用户时取充值单号），
+     * 保证同一用户的充值事件进入同一 Kafka partition、按生产顺序消费。
      */
     private int enqueueOutbox(List<DepositRecord> records) {
         if (records.isEmpty()) {
@@ -251,6 +254,9 @@ public class DepositRoutingServiceImpl implements DepositRoutingService {
             OutboxMessage message = new OutboxMessage();
             message.setBizType(OutboxConsts.BizType.DEPOSIT);
             message.setBizNo(record.getDepositNo());
+            // 同一用户的事件必须进同一 partition：USER 用 userId；HOT 无归属用户，回退单号
+            message.setPartitionKey(record.getUserId() != null && !record.getUserId().isBlank()
+                    ? record.getUserId() : record.getDepositNo());
             message.setPayload(toPayload(record));
             message.setStatus(OutboxConsts.Status.NEW);
             message.setRetryCount(0);

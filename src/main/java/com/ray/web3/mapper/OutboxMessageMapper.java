@@ -29,8 +29,8 @@ public interface OutboxMessageMapper {
      * 避免 JVM 与 MySQL 时区不一致时消息被推迟/提前数小时。
      */
     @Insert("""
-            INSERT INTO outbox_message (biz_type, biz_no, payload, status, retry_count)
-            VALUES (#{bizType}, #{bizNo}, #{payload}, #{status}, #{retryCount})
+            INSERT INTO outbox_message (biz_type, biz_no, partition_key, payload, status, retry_count)
+            VALUES (#{bizType}, #{bizNo}, #{partitionKey}, #{payload}, #{status}, #{retryCount})
             """)
     @Options(useGeneratedKeys = true, keyProperty = "id", keyColumn = "id")
     int insert(OutboxMessage message);
@@ -41,7 +41,7 @@ public interface OutboxMessageMapper {
      * 必须在事务内调用，否则锁在语句结束即释放，其他实例会重复拿到同一批。
      */
     @Select("""
-            SELECT id, biz_type, biz_no, payload, status, retry_count, next_retry_at, created_at
+            SELECT id, biz_type, biz_no, partition_key, payload, status, retry_count, next_retry_at, created_at
             FROM outbox_message
             WHERE status = 'NEW' AND next_retry_at <= NOW(3)
             ORDER BY id

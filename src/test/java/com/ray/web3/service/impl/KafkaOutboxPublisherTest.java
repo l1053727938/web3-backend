@@ -17,13 +17,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Kafka 投递通道单测（第 3 周 Day 5-6）：成功发送 key=bizNo/value=payload；broker 失败抛异常供投递器退避
+ * Kafka 投递通道单测（第 3 周 Day 5-6）：key=partitionKey（userId），为空回退 bizNo；broker 失败抛异常供投递器退避
  */
 @ExtendWith(MockitoExtension.class)
 class KafkaOutboxPublisherTest {
 
     private static final String TOPIC = "deposit-outbox";
     private static final String KEY = "DP1";
+    private static final String USER_ID = "10001";
     private static final String PAYLOAD = "{\"depositNo\":\"DP1\"}";
 
     @Mock
@@ -40,7 +41,17 @@ class KafkaOutboxPublisherTest {
     }
 
     @Test
-    void 投递成功时按业务单号做key发送payload() {
+    void 有分区键时按userId发送保证同用户进同一分区() {
+        when(kafkaTemplate.send(TOPIC, USER_ID, PAYLOAD))
+                .thenReturn(CompletableFuture.completedFuture((SendResult<String, String>) null));
+
+        publisher.publish(message(USER_ID));
+
+        verify(kafkaTemplate).send(TOPIC, USER_ID, PAYLOAD);
+    }
+
+    @Test
+    void 分区键为空时回退业务单号做key() {
         when(kafkaTemplate.send(TOPIC, KEY, PAYLOAD))
                 .thenReturn(CompletableFuture.completedFuture((SendResult<String, String>) null));
 
@@ -60,10 +71,15 @@ class KafkaOutboxPublisherTest {
     }
 
     private static OutboxMessage message() {
+        return message(null);
+    }
+
+    private static OutboxMessage message(String partitionKey) {
         OutboxMessage message = new OutboxMessage();
         message.setId(1L);
         message.setBizType("DEPOSIT");
         message.setBizNo(KEY);
+        message.setPartitionKey(partitionKey);
         message.setPayload(PAYLOAD);
         message.setStatus("NEW");
         message.setRetryCount(0);

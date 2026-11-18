@@ -32,6 +32,12 @@ public class OutboxMessage {
     /** 业务单号（如充值单号），消费端按此幂等 */
     private String bizNo;
 
+    /**
+     * Kafka 分区键：同一用户的事件必须使用同一个 key（通常为 userId），
+     * 保证进入同一 partition 按序消费；为空时投递器回退 {@link #bizNo}。
+     */
+    private String partitionKey;
+
     /** 消息体快照（JSON 字符串），避免投递时业务表已变更 */
     private String payload;
 
