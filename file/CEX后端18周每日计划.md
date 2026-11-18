@@ -257,6 +257,7 @@
 > **状态：🟢 完成（2026-11-18）**
 > **已有**：`outbox_message` 表、`DepositRoutingServiceImpl` 同事务写 Outbox、`OutboxDispatcher`（`SKIP LOCKED` + 指数退避）、Redis/Kafka 双通道、Kafka 消费者（手动 ack + `consumer_biz` 幂等 + 账本入账）、`partition_key=userId` 的分区键与 6 分区 topic、26 个相关单测/H2 事务回滚测试；本地 MySQL 端到端 5 笔充值落账（outbox SENT=5 / consumer_biz=5 / ledger_entry=5，账户 900001 与 900101 余额一致）
 > **Day 7 校验**：风险表、三项自测、两项验收与避坑核对见 `file/第三阶段/Day7风险表与自测.md`
+> **实现总结**：实现清单、配置、可靠性语义、本地验证与避坑见 `file/第三阶段/第3周消息可靠性与Outbox实现总结.md`
 > **待补/可选**：WS 断线重连实跑记录
 
 - ✅ **Day 1-2（3h）：[🔴 P1 死磕：Outbox 原理 · 🟡 P2 理解：Kafka 概念] Kafka 概念 + outbox 表**
