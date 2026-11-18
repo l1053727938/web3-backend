@@ -6,6 +6,7 @@ import com.ray.web3.mapper.ConsumerBizMapper;
 import com.ray.web3.model.entity.Account;
 import com.ray.web3.model.entity.LedgerEntry;
 import com.ray.web3.model.vo.DepositEventVO;
+import com.ray.web3.service.LedgerAccountService;
 import com.ray.web3.service.LedgerService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -46,6 +47,8 @@ class DepositCreditServiceTest {
     private AccountMapper accountMapper;
     @Mock
     private LedgerService ledgerService;
+    @Mock
+    private LedgerAccountService ledgerAccountService;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private DepositConsumerProperties consumerProperties;
@@ -57,7 +60,7 @@ class DepositCreditServiceTest {
         consumerProperties.setPlatformLiabilityAccountId(900101L);
         consumerProperties.setUserAccountType("SPOT");
         service = new DepositCreditService(consumerBizMapper, accountMapper, ledgerService,
-                objectMapper, consumerProperties);
+                ledgerAccountService, objectMapper, consumerProperties);
     }
 
     @Test

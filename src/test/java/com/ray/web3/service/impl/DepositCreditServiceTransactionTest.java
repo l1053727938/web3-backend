@@ -10,6 +10,7 @@ import com.ray.web3.mapper.ConsumerBizMapper;
 import com.ray.web3.model.entity.Account;
 import com.ray.web3.model.entity.LedgerEntry;
 import com.ray.web3.model.vo.DepositEventVO;
+import com.ray.web3.service.LedgerAccountService;
 import com.ray.web3.service.LedgerService;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.h2.jdbcx.JdbcDataSource;
@@ -78,7 +79,7 @@ class DepositCreditServiceTransactionTest {
         DepositConsumerProperties properties = new DepositConsumerProperties();
         properties.setPlatformLiabilityAccountId(900101L);
         service = new DepositCreditService(consumerBizMapper, accountMapper, ledgerService,
-                new ObjectMapper(), properties);
+                mock(LedgerAccountService.class), new ObjectMapper(), properties);
         txTemplate = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
     }
 

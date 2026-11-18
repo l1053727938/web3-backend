@@ -3,7 +3,8 @@ target/
 .idea/
 *.iml
 *.iws
-wallet/
+# 仅忽略仓库根目录下 web3j 生成的钱包目录，避免误伤 src/.../wallet 源码包
+/wallet/
 *.keystore
 *.json.backup
 logs/
