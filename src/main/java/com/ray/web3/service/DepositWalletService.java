@@ -2,7 +2,9 @@ package com.ray.web3.service;
 
 import com.ray.web3.model.entity.DepositWallet;
 
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 充值地址匹配（REQ-BIZ-04 模块四 · 热钱包匹配）
@@ -30,6 +32,17 @@ public interface DepositWalletService {
      * 走 DB 而不是缓存：注册/查询要求强一致，缓存只服务高频的“按地址反查用户”。
      */
     DepositWallet findUserWallet(Long chainId, long userId);
+
+    /**
+     * 按收款地址批量反查归属用户（直接查 DB，不走缓存）。
+     * <p>
+     * 路由写 Outbox 前用它校正 {@code userId}：内存钱包缓存可能来自配置中心（没有 userId），
+     * 或存在最长一个 TTL 的刷新延迟，不能作为下游入账的唯一依据。
+     *
+     * @param addresses 收款地址（大小写不敏感，内部统一小写去重）
+     * @return 小写地址 → userId；只包含启用中的 USER 地址，HOT 地址不在结果中
+     */
+    Map<String, String> findUserIdsByAddresses(Long chainId, Collection<String> addresses);
 
     /** 强制立即回源刷新缓存（新增/停用地址后无需等 TTL） */
     void invalidateCache();

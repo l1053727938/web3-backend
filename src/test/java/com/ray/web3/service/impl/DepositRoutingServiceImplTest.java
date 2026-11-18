@@ -23,6 +23,7 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigInteger;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -110,6 +111,31 @@ class DepositRoutingServiceImplTest {
 
         // 3) 不再直接发布，也不在路由阶段回填 notify_status（由投递器负责）
         verify(depositRecordMapper, never()).updateById(any(DepositRecord.class));
+    }
+
+    @Test
+    void 写outbox前应按收款地址反查用户并回填() {
+        givenHotWalletMatched();
+        when(depositRecordMapper.insertIgnoreBatch(any())).thenReturn(1);
+        DepositRecord stored = storedRecord();
+        stored.setUserId(null);
+        when(depositRecordMapper.selectByTxLog(CHAIN_ID, TX_HASH, 7L)).thenReturn(stored);
+        when(depositWalletService.findUserIdsByAddresses(CHAIN_ID, List.of(HOT_WALLET)))
+                .thenReturn(Map.of(HOT_WALLET, "10001"));
+
+        assertThat(service.route(List.of(event()), DepositConsts.Source.STREAM)).isEqualTo(1);
+
+        // 业务表回填 userId/walletType，与 Outbox 载荷保持同一口径
+        ArgumentCaptor<DepositRecord> updateCaptor = ArgumentCaptor.forClass(DepositRecord.class);
+        verify(depositRecordMapper).updateById(updateCaptor.capture());
+        assertThat(updateCaptor.getValue().getUserId()).isEqualTo("10001");
+        assertThat(updateCaptor.getValue().getWalletType()).isEqualTo(DepositConsts.WalletType.USER);
+
+        ArgumentCaptor<OutboxMessage> outboxCaptor = ArgumentCaptor.forClass(OutboxMessage.class);
+        verify(outboxMessageMapper).insert(outboxCaptor.capture());
+        assertThat(outboxCaptor.getValue().getPayload())
+                .contains("\"userId\":\"10001\"")
+                .contains("\"walletType\":\"USER\"");
     }
 
     @Test

@@ -18,7 +18,9 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 /**
@@ -74,6 +76,19 @@ class DepositWalletServiceImplTest {
         assertThat(matched.getWalletType()).isEqualTo(DepositConsts.WalletType.USER);
         assertThat(matched.getUserId()).isEqualTo("u-100");
         assertThat(service.activeWallets()).hasSize(1);
+    }
+
+    @Test
+    void 按地址批量反查用户只命中启用的USER地址() {
+        DepositWallet user = wallet(MIXED_CASE_HOT, DepositConsts.WalletType.USER, "10001");
+        when(depositWalletMapper.selectUserWalletsByAddresses(eq(CHAIN_ID), anyList()))
+                .thenReturn(List.of(user));
+
+        Map<String, String> userIdByAddress = service.findUserIdsByAddresses(
+                CHAIN_ID, List.of(MIXED_CASE_HOT.toUpperCase(Locale.ROOT), USER_ADDRESS));
+
+        // 输入大小写不敏感，结果统一小写地址；只有 USER 地址有归属用户
+        assertThat(userIdByAddress).containsExactly(Map.entry(LOWER_HOT, "10001"));
     }
 
     @Test

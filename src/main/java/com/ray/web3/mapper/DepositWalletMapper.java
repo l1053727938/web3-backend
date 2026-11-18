@@ -5,6 +5,7 @@ import com.ray.web3.model.entity.DepositWallet;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -33,4 +34,24 @@ public interface DepositWalletMapper extends BaseMapper<DepositWallet> {
             LIMIT 1
             """)
     DepositWallet selectUserWallet(@Param("chainId") Long chainId, @Param("userId") String userId);
+
+    /**
+     * 按收款地址批量反查 USER 地址的归属用户：路由写 Outbox 前校正 userId。
+     * <p>
+     * 只返回启用中的 USER 行；HOT 是平台归集地址，没有归属用户，不返回。
+     */
+    @Select("""
+            <script>
+            SELECT * FROM deposit_wallet
+            WHERE chain_id = #{chainId}
+              AND status = 1
+              AND wallet_type = 'USER'
+              AND address IN
+              <foreach collection="addresses" item="address" open="(" separator="," close=")">
+                #{address}
+              </foreach>
+            </script>
+            """)
+    List<DepositWallet> selectUserWalletsByAddresses(@Param("chainId") Long chainId,
+                                                     @Param("addresses") Collection<String> addresses);
 }

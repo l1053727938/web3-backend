@@ -27,6 +27,9 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
 
 /**
  * 充值路由实现（REQ-BIZ-04 模块四 + 第 3 周 Day 3-4 Outbox 改造）
@@ -110,7 +113,11 @@ public class DepositRoutingServiceImpl implements DepositRoutingService {
         List<DepositRecord> toNotify = new ArrayList<>(matched.size());
         long inserted = insertIgnoreChunks(matched, chainId, toNotify);
 
-        // 3. 同事务写 Outbox：与上面的充值记录同生共死
+        // 3. 写 Outbox 前按收款地址反查归属用户：钱包缓存可能来自配置中心（没有 userId）
+        //    或存在刷新延迟，userId 必须以 deposit_wallet 的 address→user 映射为准
+        fillUserIdsByAddress(chainId, toNotify);
+
+        // 4. 同事务写 Outbox：与上面的充值记录同生共死
         int enqueued = enqueueOutbox(toNotify);
         log.info("[deposit] 充值路由 source={} events={} matched={} inserted={} outbox={}",
                 source, events.size(), matched.size(), inserted, enqueued);
@@ -186,6 +193,47 @@ public class DepositRoutingServiceImpl implements DepositRoutingService {
             toNotify.add(exist);
         }
         return recovered;
+    }
+
+    /**
+     * 按收款地址批量反查归属用户，回填 userId。
+     * <p>
+     * 匹配阶段的 userId 来自内存钱包缓存：配置中心条目没有 userId，DB 条目也有一个 TTL 的
+     * 刷新延迟。写 Outbox 前以 {@code deposit_wallet} 的 address→user_id 映射再校正一次，
+     * 避免用户地址在缓存中缺失/仍是 HOT 时，把充值通知投成“无主”消息。
+     * <p>
+     * 只反查启用中的 USER 地址；HOT 是平台归集地址，保持 userId=null（下游按设计拒绝入用户账本）。
+     * 反查结果与落库值不一致时同步回写 deposit_record，保证业务表与 Outbox 载荷同一口径。
+     */
+    private void fillUserIdsByAddress(Long chainId, List<DepositRecord> records) {
+        if (records.isEmpty()) {
+            return;
+        }
+        List<String> addresses = records.stream()
+                .map(DepositRecord::getToAddress)
+                .filter(Objects::nonNull)
+                .toList();
+        Map<String, String> userIdByAddress =
+                depositWalletService.findUserIdsByAddresses(chainId, addresses);
+        if (userIdByAddress.isEmpty()) {
+            return;
+        }
+
+        for (DepositRecord record : records) {
+            if (record.getToAddress() == null) {
+                continue;
+            }
+            String userId = userIdByAddress.get(record.getToAddress().toLowerCase(Locale.ROOT));
+            if (userId == null || userId.equals(record.getUserId())) {
+                continue;
+            }
+            log.info("[deposit] 按收款地址反查用户 address={} userId={}（原值={}）depositNo={}",
+                    record.getToAddress(), userId, record.getUserId(), record.getDepositNo());
+            record.setUserId(userId);
+            // DB 里该地址是 USER：同步纠正缓存里可能残留的 HOT 类型
+            record.setWalletType(DepositConsts.WalletType.USER);
+            depositRecordMapper.updateById(record);
+        }
     }
 
     /**

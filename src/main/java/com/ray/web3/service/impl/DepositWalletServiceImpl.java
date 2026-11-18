@@ -13,10 +13,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 充值地址匹配实现：配置中心热钱包 + DB 用户地址合并成小写地址索引，按 TTL 回源
@@ -57,6 +59,31 @@ public class DepositWalletServiceImpl implements DepositWalletService {
     @Override
     public DepositWallet findUserWallet(Long chainId, long userId) {
         return depositWalletMapper.selectUserWallet(chainId, String.valueOf(userId));
+    }
+
+    @Override
+    public Map<String, String> findUserIdsByAddresses(Long chainId, Collection<String> addresses) {
+        if (addresses == null || addresses.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        List<String> normalized = addresses.stream()
+                .map(this::normalize)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (normalized.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
+        Map<String, String> userIdByAddress = new LinkedHashMap<>();
+        for (DepositWallet wallet : depositWalletMapper.selectUserWalletsByAddresses(chainId, normalized)) {
+            String address = normalize(wallet.getAddress());
+            if (address == null || isBlank(wallet.getUserId())) {
+                continue;
+            }
+            userIdByAddress.put(address, wallet.getUserId());
+        }
+        return userIdByAddress;
     }
 
     @Override
