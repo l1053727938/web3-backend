@@ -250,13 +250,14 @@
 
 ---
 
-## 【第 3 周：消息可靠性与 outbox】  🟡
+## 【第 3 周：消息可靠性与 outbox】  🟢
 
 核心目标：把现有"先落库再 `PUBLISH`"改成"业务 + outbox 同事务"；订阅端按 `biz_no` 幂等。这是"充值确认后通知账务"的可靠性基座。
 
-> **状态：🟡 部分完成 · 约 90%（2026-11-16）**
-> **已有**：`outbox_message` 表、`DepositRoutingServiceImpl` 同事务写 Outbox、`OutboxDispatcher`（`SKIP LOCKED` + 指数退避）、Redis/Kafka 双通道、Kafka 消费者（手动 ack + `consumer_biz` 幂等 + 账本入账）、26 个相关单测/H2 事务回滚测试；Kafka 容器已验证 healthy
-> **待补**：用本机实际 MySQL 凭据跑一次完整端到端充值并留存三行日志/截图；WS 断线重连实跑记录
+> **状态：🟢 完成（2026-11-18）**
+> **已有**：`outbox_message` 表、`DepositRoutingServiceImpl` 同事务写 Outbox、`OutboxDispatcher`（`SKIP LOCKED` + 指数退避）、Redis/Kafka 双通道、Kafka 消费者（手动 ack + `consumer_biz` 幂等 + 账本入账）、`partition_key=userId` 的分区键与 6 分区 topic、26 个相关单测/H2 事务回滚测试；本地 MySQL 端到端 5 笔充值落账（outbox SENT=5 / consumer_biz=5 / ledger_entry=5，账户 900001 与 900101 余额一致）
+> **Day 7 校验**：风险表、三项自测、两项验收与避坑核对见 `file/第三阶段/Day7风险表与自测.md`
+> **待补/可选**：WS 断线重连实跑记录
 
 - ✅ **Day 1-2（3h）：[🔴 P1 死磕：Outbox 原理 · 🟡 P2 理解：Kafka 概念] Kafka 概念 + outbox 表**
   - Kafka 四件事（🟡 P2）只取结论，不碰源码；Outbox 同事务与"至少一次必重复"的推理（🔴 P1）必须能脱稿讲。
@@ -274,7 +275,7 @@
   - 投递成功后 `status='SENT'`；失败 `retry_count+1`，按退避算 `next_retry_at`。
   - 输出：改造 commit + 单测（业务回滚则 outbox 为空）。
 
-- 🟡 **Day 5-6（4h）：消费者与本地跑通**
+- ✅ **Day 5-6（4h）：消费者与本地跑通**
   - `docker compose` 起 Kafka（KRaft 单节点即可，别折腾 ZK）。
   - 消费者：`enable.auto.commit=false`，处理成功才 `ack.acknowledge()`。
   - 幂等表：`consumer_biz (biz_no VARCHAR PK, consumed_at)`，处理前 `INSERT` 命中主键冲突 → 直接 ack 跳过。
@@ -282,9 +283,10 @@
   - 断一次 WS 再重连（现成 `TransferStreamEngine` 会自动退避重建），校验：不重复入账、不漏入账、`newHeads` 心跳能判出僵尸连接。
   - 输出：一条完整链路日志（截图关键三行）。
 
-- **Day 7（2h）：风险表 + 自测**
+- ✅ **Day 7（2h）：风险表 + 自测**
   - 画一张表：消息丢了会怎样 / 重复会怎样 / 乱序会怎样，各自的兜底在哪。
   - 自测：为什么不能先发消息？消费成功但 commit 失败怎么办？分区键为什么选 `user_id`？
+  - 输出：`file/第三阶段/Day7风险表与自测.md`（含两项验收的自动化证据与本地库数据）
 
 > **阶段产出**：`outbox_message` 表 + 投递器 + 幂等消费者 + 端到端跑通记录。
 > **验收**：停掉投递器，业务照常落库（证明解耦）；手插两条同 `biz_no`，只落一次账。
