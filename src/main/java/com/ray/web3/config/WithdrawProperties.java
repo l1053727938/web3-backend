@@ -67,6 +67,17 @@ public class WithdrawProperties {
      */
     private long trackStuckTimeoutMs = 600000L;
 
+    // ===== 第 4 周 Day 3-4：FAILED 提币自动解冻补偿 =====
+
+    /**
+     * 解冻补偿扫描间隔(ms)：FAILED 且未补偿的提币由账本反查原冻结分录后自动解冻。
+     * 幂等由账本 {@code (UNFREEZE, withdrawNo_REFUND)} 保证，扫描重复执行不会重复加钱。
+     */
+    private long refundScanIntervalMs = 60000L;
+
+    /** 单轮最多补偿条数：限批防一次性打爆账本连接池 */
+    private int refundBatchSize = 100;
+
     // ===== Day 5-7：卡单加速（Replace-by-fee）与撤销覆盖 =====
 
     /** 自动加速开关：关闭时只标注卡单不提价重播（仍可人工调加速/撤销接口），与追踪开关解耦便于单独灰度 */

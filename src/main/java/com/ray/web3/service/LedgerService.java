@@ -60,6 +60,18 @@ public interface LedgerService {
                          String currency);
 
     /**
+     * 提币失败自动解冻（第 4 周 Day 3-4）：按原冻结分录反查账户与金额，写一组解冻分录。
+     * <p>
+     * 为什么从账本反查而不是查 {@code withdraw_record}：账本是冻结事实的来源，
+     * 账户 id / 金额 / 币种都在原 {@code (FREEZE, withdrawNo)} 分录里，避免提币表与账本两处口径不一致。
+     * <p>
+     * 幂等：解冻单号为 {@code withdrawNo + "_REFUND"}，重复补偿撞 {@code uk_biz} 返回首次解冻组。
+     *
+     * @return 解冻分录；原冻结分录不存在（该提币从未冻结）时返回 null，调用方可视为无需补偿
+     */
+    LedgerEntry refundWithdrawFreeze(String withdrawNo);
+
+    /**
      * ③ 成交清算：本金与手续费分成两组分录，但在同一个事务里提交。
      * <p>
      * 本金：Taker frozen ↓ / Maker available ↑；手续费：付款方 available ↓ / 平台手续费账户 ↑。

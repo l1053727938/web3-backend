@@ -137,15 +137,21 @@ CREATE TABLE IF NOT EXISTS withdraw_record
     transaction_hash VARCHAR(80)         DEFAULT NULL COMMENT '当前生效的交易哈希（加速重播后被同 Nonce 的新交易哈希原地替换）',
     status          VARCHAR(24)  NOT NULL DEFAULT 'INIT' COMMENT '状态：INIT=已落库未广播，BROADCAST=已广播待确认，SUCCESS/FAILED=Day3-4 追踪回填，REPLACED=被加速/撤销交易覆盖作废',
     error_message   VARCHAR(512)          DEFAULT NULL COMMENT '失败/拒绝原因（估算 revert、节点拒接、卡单标注等）',
+    refund_status   VARCHAR(16)  NOT NULL DEFAULT 'NONE' COMMENT '解冻补偿状态：NONE=未处理/无需，REFUNDED=已自动解冻',
     updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     UNIQUE KEY uk_withdraw_no (withdraw_no),
     UNIQUE KEY uk_chain_wallet_nonce (chain_id, from_address, nonce),
-    KEY idx_status (status, updated_at)
+    KEY idx_status (status, updated_at),
+    KEY idx_refund (status, refund_status)
 ) ENGINE = InnoDB COMMENT ='提币交易记录（构造→签名→广播→追踪→加速）';
 
 -- ⚠ 本表用 CREATE TABLE IF NOT EXISTS，对已存在的库不会补列；Day 5-7 新增 accelerate_count，
 --   旧库需手工执行一次：ALTER TABLE withdraw_record ADD COLUMN accelerate_count INT NOT NULL DEFAULT 0 COMMENT '已提价重播次数' AFTER gas_price;
+--   第 4 周 Day 3-4 新增 refund_status（FAILED 提币自动解冻补偿），旧库需执行：
+--   ALTER TABLE withdraw_record ADD COLUMN refund_status VARCHAR(16) NOT NULL DEFAULT 'NONE'
+--       COMMENT '解冻补偿状态：NONE=未处理/无需，REFUNDED=已自动解冻' AFTER error_message;
+--   ALTER TABLE withdraw_record ADD KEY idx_refund (status, refund_status);
 
 -- V1__account.sql
 -- 账户余额表：一个用户 × 一个账户类型 × 一个币种 = 一行
@@ -290,3 +296,23 @@ CREATE TABLE IF NOT EXISTS `consumer_biz` (
   `consumed_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '消费成功时间',
   PRIMARY KEY (`biz_no`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='消费端幂等表：挡住 Outbox 至少一次投递带来的重复消息';
+
+-- 死信队列（第 4 周 Day 1-2）：重试达到上限的消息在这里留档，原 outbox_message 不删除只置 FAILED
+-- 幂等键 uk_source：同一条原消息只会产生一条死信，重复处理不会堆多条
+CREATE TABLE IF NOT EXISTS `dlq_message` (
+  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `source_table`  VARCHAR(32)     NOT NULL                COMMENT '来源表，当前固定 outbox_message',
+  `source_id`     BIGINT UNSIGNED NOT NULL                COMMENT '原消息 id',
+  `biz_type`      VARCHAR(32)     NOT NULL                COMMENT '业务类型：DEPOSIT/WITHDRAW/MATCH 等',
+  `biz_no`        VARCHAR(128)    NOT NULL                COMMENT '业务单号，人工按此找回业务记录',
+  `partition_key` VARCHAR(64)     NULL                    COMMENT '原消息分区键',
+  `payload`       TEXT            NULL                    COMMENT '原消息体快照',
+  `retry_count`   INT             NOT NULL                COMMENT '转移时的累计失败次数',
+  `error_message` VARCHAR(512)    NULL                    COMMENT '最后一次失败原因（截断）',
+  `status`        VARCHAR(16)     NOT NULL DEFAULT 'OPEN' COMMENT 'OPEN=待处理，HANDLED=已处理，IGNORED=确认忽略',
+  `created_at`    DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '进入死信时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_source` (`source_table`, `source_id`),
+  KEY `idx_biz_no` (`biz_no`),
+  KEY `idx_status_created` (`status`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='死信队列：重试超限消息留档，不删除原消息';

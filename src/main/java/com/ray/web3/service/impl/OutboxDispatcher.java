@@ -4,11 +4,14 @@ import com.ray.web3.config.OutboxProperties;
 import com.ray.web3.consts.DepositConsts;
 import com.ray.web3.consts.OutboxConsts;
 import com.ray.web3.mapper.DepositRecordMapper;
+import com.ray.web3.mapper.DlqMessageMapper;
 import com.ray.web3.mapper.OutboxMessageMapper;
+import com.ray.web3.model.entity.DlqMessage;
 import com.ray.web3.model.entity.OutboxMessage;
 import com.ray.web3.service.OutboxPublisher;
-import com.ray.web3.util.OutboxBackoff;
-import lombok.RequiredArgsConstructor;
+import com.ray.web3.util.RetryPolicy;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,8 +27,9 @@ import java.util.List;
  *   <li>按 {@code status='NEW' AND next_retry_at <= NOW()} 扫描一批消息，并用
  *       {@code FOR UPDATE SKIP LOCKED} 锁住；多实例部署时各拿各的批次，不会抢同一条；</li>
  *   <li>逐条调用 {@link OutboxPublisher} 投递；</li>
- *   <li>成功置 {@code SENT}，失败累计 {@code retry_count} 并按 {@link OutboxBackoff} 推进
- *       {@code next_retry_at}；达到上限置 {@code FAILED}。</li>
+ *   <li>成功置 {@code SENT}，失败累计 {@code retry_count} 并按 {@link RetryPolicy}
+ *       推进 {@code next_retry_at}（指数退避 + jitter）；达到上限写 {@code dlq_message}
+ *       并把原消息置 {@code FAILED}（<b>不删除原消息</b>）。</li>
  * </ol>
  * <p>
  * <b>为什么投递也放在事务里</b>：{@code SKIP LOCKED} 的行锁只在事务期间有效，
@@ -42,13 +46,38 @@ import java.util.List;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class OutboxDispatcher {
+
+    /** 死信错误信息截断长度，对齐 dlq_message.error_message VARCHAR(512) */
+    private static final int ERROR_MESSAGE_MAX_LENGTH = 512;
 
     private final OutboxMessageMapper outboxMessageMapper;
     private final OutboxPublisher outboxPublisher;
     private final DepositRecordMapper depositRecordMapper;
+    private final DlqMessageMapper dlqMessageMapper;
     private final OutboxProperties outboxProperties;
+    private final RetryPolicy retryPolicy;
+
+    /** 死信告警信号：进入 dlq 的消息数，非 0 就应触发人工处理 */
+    private final Counter dlqCounter;
+
+    public OutboxDispatcher(OutboxMessageMapper outboxMessageMapper,
+                            OutboxPublisher outboxPublisher,
+                            DepositRecordMapper depositRecordMapper,
+                            DlqMessageMapper dlqMessageMapper,
+                            OutboxProperties outboxProperties,
+                            RetryPolicy retryPolicy,
+                            MeterRegistry meterRegistry) {
+        this.outboxMessageMapper = outboxMessageMapper;
+        this.outboxPublisher = outboxPublisher;
+        this.depositRecordMapper = depositRecordMapper;
+        this.dlqMessageMapper = dlqMessageMapper;
+        this.outboxProperties = outboxProperties;
+        this.retryPolicy = retryPolicy;
+        this.dlqCounter = Counter.builder("outbox.dlq")
+                .description("进入死信队列的消息数（重试超限）")
+                .register(meterRegistry);
+    }
 
     /**
      * 扫描并投递一批消息；返回本轮投递成功的条数。
@@ -102,22 +131,51 @@ public class OutboxDispatcher {
      */
     private void handleFailure(OutboxMessage message, Exception cause) {
         int retryCount = (message.getRetryCount() == null ? 0 : message.getRetryCount()) + 1;
-        long delaySeconds = OutboxBackoff.delaySeconds(retryCount,
-                outboxProperties.getRetryBaseSeconds(), outboxProperties.getRetryMaxSeconds());
+        long delaySeconds = retryPolicy.delaySeconds(retryCount);
 
-        if (retryCount >= outboxProperties.getMaxRetries()) {
+        if (retryPolicy.isExhausted(retryCount)) {
+            // 先写死信、再置 FAILED，且都在当前事务内：任何一步失败整轮回滚，
+            // 消息保持 NEW 继续重试，绝不会出现“原消息没了、死信也没写”的丢消息
+            moveToDlq(message, retryCount, cause);
             outboxMessageMapper.markFailed(message.getId(), delaySeconds);
-            log.error("[outbox] 投递失败且达到重试上限({})，标记 FAILED id={} bizType={} bizNo={}: {}",
-                    outboxProperties.getMaxRetries(), message.getId(), message.getBizType(),
+            log.error("[outbox][dlq] 投递失败达到上限({})，已写死信并保留原消息 FAILED "
+                            + "id={} bizType={} bizNo={}: {}",
+                    retryPolicy.maxAttempts(), message.getId(), message.getBizType(),
                     message.getBizNo(), cause.getMessage());
         } else {
             outboxMessageMapper.markRetry(message.getId(), delaySeconds);
-            log.warn("[outbox] 投递失败，{} 秒后重试 id={} bizType={} bizNo={} retry={}: {}",
+            log.warn("[outbox] 投递失败，{}s 后重试（含抖动） id={} bizType={} bizNo={} retry={}/{}: {}",
                     delaySeconds, message.getId(), message.getBizType(), message.getBizNo(),
-                    retryCount, cause.getMessage());
+                    retryCount, retryPolicy.maxAttempts(), cause.getMessage());
         }
 
         updateDepositNotifyStatus(message, DepositConsts.Notify.FAILED, null);
+    }
+
+    /**
+     * 写死信：原 outbox_message 不删除，只置 FAILED；死信用 {@code uk_source} 幂等，
+     * 重复处理不会产生多条。
+     */
+    private void moveToDlq(OutboxMessage message, int retryCount, Exception cause) {
+        DlqMessage dlq = new DlqMessage();
+        dlq.setSourceTable(OutboxConsts.SourceTable.OUTBOX);
+        dlq.setSourceId(message.getId());
+        dlq.setBizType(message.getBizType());
+        dlq.setBizNo(message.getBizNo());
+        dlq.setPartitionKey(message.getPartitionKey());
+        dlq.setPayload(message.getPayload());
+        dlq.setRetryCount(retryCount);
+        dlq.setErrorMessage(truncate(cause.getMessage(), ERROR_MESSAGE_MAX_LENGTH));
+        dlq.setStatus(OutboxConsts.DlqStatus.OPEN);
+        dlqMessageMapper.insertIgnore(dlq);
+        dlqCounter.increment();
+    }
+
+    private static String truncate(String value, int maxLength) {
+        if (value == null) {
+            return null;
+        }
+        return value.length() <= maxLength ? value : value.substring(0, maxLength);
     }
 
     /**

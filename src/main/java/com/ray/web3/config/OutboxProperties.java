@@ -31,8 +31,8 @@ public class OutboxProperties {
     /** 最大重试次数，达到后置 FAILED 停止自动投递（W4 的 8 次上限） */
     private int maxRetries = 8;
 
-    /** 退避基数（秒）：第 1 次重试等待 base，之后每轮翻倍 */
-    private long retryBaseSeconds = 5L;
+    /** 退避基数（秒）：第 1 次重试等待 base，之后每轮翻倍；实际等待再乘 [0.5, 1.5) 抖动 */
+    private long retryBaseSeconds = 1L;
 
     /** 退避上限（秒）：指数增长不超过该值 */
     private long retryMaxSeconds = 300L;
@@ -54,5 +54,11 @@ public class OutboxProperties {
 
         /** 单条消息同步等待 broker 确认的超时（秒）；超时即视为投递失败并进入退避 */
         private long sendTimeoutSeconds = 5L;
+
+        /**
+         * 消费 lag 指标刷新间隔（毫秒）：由 {@code KafkaLagMonitor} 自算
+         * {@code endOffset - committedOffset} 并暴露为 {@code kafka_consumer_lag}。
+         */
+        private long lagRefreshMs = 15000L;
     }
 }

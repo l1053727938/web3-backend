@@ -91,6 +91,28 @@ public interface WithdrawRecordMapper extends BaseMapper<WithdrawRecord> {
                      @Param("errorMessage") String errorMessage);
 
     /**
+     * 取待解冻补偿的 FAILED 记录（第 4 周 Day 3-4）：
+     * 只处理 {@code refund_status='NONE'}，补偿成功后置 REFUNDED，避免每轮重复扫同一笔。
+     */
+    @Select("""
+            SELECT * FROM withdraw_record
+            WHERE status = 'FAILED' AND refund_status = 'NONE'
+            ORDER BY id
+            LIMIT #{limit}
+            """)
+    List<WithdrawRecord> selectFailedUnrefunded(@Param("limit") int limit);
+
+    /**
+     * 标记解冻补偿已完成：即使原冻结分录不存在（无需解冻）也置位，防止反复扫描
+     */
+    @Update("""
+            UPDATE withdraw_record
+            SET refund_status = 'REFUNDED'
+            WHERE withdraw_no = #{withdrawNo} AND status = 'FAILED'
+            """)
+    int markRefunded(@Param("withdrawNo") String withdrawNo);
+
+    /**
      * 追踪心跳：本轮未得出终态的 BROADCAST 记录回写 {@code updated_at} 使其排到队尾。
      * <p>
      * 只动时间戳不动 status，因此不穿越状态机；作用是给 {@link #selectByStatus} 的 {@code updated_at ASC}

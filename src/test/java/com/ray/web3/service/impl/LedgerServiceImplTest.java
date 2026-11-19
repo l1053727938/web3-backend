@@ -275,6 +275,56 @@ class LedgerServiceImplTest {
         verify(ledgerPostingMapper, never()).insertBatch(anyList());
     }
 
+    @Test
+    void 提币失败应反查冻结分录并自动解冻() {
+        LedgerEntry freeze = new LedgerEntry();
+        freeze.setId(20L);
+        freeze.setEntryNo("LE20");
+        freeze.setBizType(LedgerConsts.BizType.FREEZE);
+        freeze.setBizNo("WD1");
+
+        when(ledgerEntryMapper.selectByBiz(LedgerConsts.BizType.FREEZE, "WD1")).thenReturn(freeze);
+        when(ledgerPostingMapper.selectByEntryId(20L)).thenReturn(List.of(
+                postingRow(11L, "DEBIT", "30", "AVAILABLE"),
+                postingRow(11L, "CREDIT", "30", "FROZEN")));
+        when(accountMapper.selectByIdForUpdate(11L)).thenReturn(account(11L, "70", "30", 4L));
+        when(ledgerEntryMapper.insert(any(LedgerEntry.class))).thenAnswer(invocation -> {
+            invocation.getArgument(0, LedgerEntry.class).setId(21L);
+            return 1;
+        });
+        when(ledgerPostingMapper.insertBatch(anyList())).thenReturn(2);
+        when(accountMapper.updateBalance(any(), any(), any(), any())).thenReturn(1);
+
+        LedgerEntry refund = service.refundWithdrawFreeze("WD1");
+
+        assertThat(refund.getBizType()).isEqualTo(LedgerConsts.BizType.UNFREEZE);
+        assertThat(refund.getBizNo()).isEqualTo("WD1_REFUND");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<LedgerPosting>> rowsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(ledgerPostingMapper).insertBatch(rowsCaptor.capture());
+        List<LedgerPosting> rows = rowsCaptor.getValue();
+        assertThat(rows.get(0).getDirection()).isEqualTo("DEBIT");
+        assertThat(rows.get(0).getBalanceType()).isEqualTo("FROZEN");
+        assertThat(rows.get(0).getBalanceAfter()).isEqualByComparingTo("0");
+        assertThat(rows.get(1).getDirection()).isEqualTo("CREDIT");
+        assertThat(rows.get(1).getBalanceType()).isEqualTo("AVAILABLE");
+        assertThat(rows.get(1).getBalanceAfter()).isEqualByComparingTo("100");
+
+        verify(accountMapper).updateBalance(eq(11L), amount("100"), amount("0"), eq(4L));
+    }
+
+    @Test
+    void 提币无冻结分录时无需解冻() {
+        when(ledgerEntryMapper.selectByBiz(LedgerConsts.BizType.FREEZE, "WD2")).thenReturn(null);
+
+        assertThat(service.refundWithdrawFreeze("WD2")).isNull();
+
+        verify(ledgerEntryMapper, never()).insert(any(LedgerEntry.class));
+        verify(ledgerPostingMapper, never()).insertBatch(anyList());
+        verifyNoInteractions(accountMapper);
+    }
+
     private static LedgerPosting postingRow(long accountId, String direction,
                                             String amount, String balanceType) {
         LedgerPosting row = new LedgerPosting();

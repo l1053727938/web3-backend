@@ -198,8 +198,8 @@ web3:
     batch-size: ${WEB3_OUTBOX_BATCH_SIZE:200}
     # 最大重试次数：达到后 status=FAILED，停止自动投递转人工补偿
     max-retries: ${WEB3_OUTBOX_MAX_RETRIES:8}
-    # 指数退避：第 1 次等待 base 秒，之后翻倍，封顶 max 秒
-    retry-base-seconds: ${WEB3_OUTBOX_RETRY_BASE_SECONDS:5}
+    # 指数退避：第 1 次等待 base 秒，之后翻倍，封顶 max 秒；实际等待再乘 [0.5, 1.5) 抖动
+    retry-base-seconds: ${WEB3_OUTBOX_RETRY_BASE_SECONDS:1}
     retry-max-seconds: ${WEB3_OUTBOX_RETRY_MAX_SECONDS:300}
     # Kafka 通道参数（transport=kafka 时生效）
     kafka:
@@ -210,6 +210,8 @@ web3:
       replicas: ${WEB3_OUTBOX_KAFKA_REPLICAS:1}
       # 单条消息等待 broker 确认的超时(秒)，超时按投递失败退避
       send-timeout-seconds: ${WEB3_OUTBOX_KAFKA_SEND_TIMEOUT_SECONDS:5}
+      # 消费 lag 指标刷新间隔(ms)：自算 endOffset - committedOffset，暴露为 kafka_consumer_lag
+      lag-refresh-ms: ${WEB3_OUTBOX_KAFKA_LAG_REFRESH_MS:15000}
 
   # ============ 用户业务（第 3 周）：注册 + 充值地址分配 ============
   user:
@@ -241,6 +243,11 @@ web3:
     track-batch-size: ${WEB3_WITHDRAW_TRACK_BATCH_SIZE:100}
     # 成功所需确认数：0=收据 status=0x1 即成功；>0 需 (链高-收据块高+1)≥此值，防区块重组误判（同充值侧口径）
     track-confirmations: ${WEB3_WITHDRAW_TRACK_CONFIRMATIONS:12}
+    # ===== 第 4 周 Day 3-4：FAILED 提币自动解冻补偿 =====
+    # 扫描 FAILED 且 refund_status=NONE 的提币，按账本原冻结分录自动解冻；幂等靠 bizNo=withdrawNo_REFUND
+    refund-scan-interval-ms: ${WEB3_WITHDRAW_REFUND_INTERVAL_MS:60000}
+    refund-scan-initial-delay-ms: ${WEB3_WITHDRAW_REFUND_INITIAL_DELAY_MS:30000}
+    refund-batch-size: ${WEB3_WITHDRAW_REFUND_BATCH_SIZE:100}
     # 卡单判定阈值(ms)：BROADCAST 停留超过本时长即标注为卡单（只写 error_message、不改状态），也是下方自动加速的入场门槛
     # 年龄按 created_at 计算；取值依链出块间隔定，10min ≈ ETH PoS 50 块；本地 Anvil 按需出块可设很大值关闭误报
     track-stuck-timeout-ms: ${WEB3_WITHDRAW_TRACK_STUCK_TIMEOUT_MS:600000}

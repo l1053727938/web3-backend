@@ -4,12 +4,17 @@ import com.ray.web3.config.OutboxProperties;
 import com.ray.web3.consts.DepositConsts;
 import com.ray.web3.consts.OutboxConsts;
 import com.ray.web3.mapper.DepositRecordMapper;
+import com.ray.web3.mapper.DlqMessageMapper;
 import com.ray.web3.mapper.OutboxMessageMapper;
+import com.ray.web3.model.entity.DlqMessage;
 import com.ray.web3.model.entity.OutboxMessage;
 import com.ray.web3.service.OutboxPublisher;
+import com.ray.web3.util.RetryPolicy;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.transaction.annotation.Transactional;
@@ -44,6 +49,8 @@ class OutboxDispatcherTest {
     private OutboxPublisher outboxPublisher;
     @Mock
     private DepositRecordMapper depositRecordMapper;
+    @Mock
+    private DlqMessageMapper dlqMessageMapper;
 
     private OutboxProperties properties;
     private OutboxDispatcher dispatcher;
@@ -55,7 +62,10 @@ class OutboxDispatcherTest {
         properties.setMaxRetries(3);
         properties.setRetryBaseSeconds(5);
         properties.setRetryMaxSeconds(300);
-        dispatcher = new OutboxDispatcher(outboxMessageMapper, outboxPublisher, depositRecordMapper, properties);
+        // 固定随机源：0.5 + 0.5 = 1.0，去掉抖动后断言确定的退避值
+        RetryPolicy retryPolicy = new RetryPolicy(5, 300, 3, () -> 0.5);
+        dispatcher = new OutboxDispatcher(outboxMessageMapper, outboxPublisher, depositRecordMapper,
+                dlqMessageMapper, properties, retryPolicy, new SimpleMeterRegistry());
     }
 
     @Test
@@ -93,6 +103,8 @@ class OutboxDispatcherTest {
         verify(depositRecordMapper).updateNotifyStatusByDepositNo(
                 eq("DP2"), eq(DepositConsts.Notify.FAILED), isNull());
         verify(outboxMessageMapper, never()).markFailed(any(), anyLong());
+        // 未达上限不进死信
+        verify(dlqMessageMapper, never()).insertIgnore(any(DlqMessage.class));
     }
 
     @Test
@@ -109,6 +121,19 @@ class OutboxDispatcherTest {
 
         verify(outboxMessageMapper).markFailed(3L, 20L);
         verify(outboxMessageMapper, never()).markRetry(any(), anyLong());
+
+        // 达上限：写一条 OPEN 死信，原 outbox 消息保留并置 FAILED（不删除）
+        ArgumentCaptor<DlqMessage> dlqCaptor = ArgumentCaptor.forClass(DlqMessage.class);
+        verify(dlqMessageMapper).insertIgnore(dlqCaptor.capture());
+        DlqMessage dlq = dlqCaptor.getValue();
+        assertThat(dlq.getSourceTable()).isEqualTo(OutboxConsts.SourceTable.OUTBOX);
+        assertThat(dlq.getSourceId()).isEqualTo(3L);
+        assertThat(dlq.getBizType()).isEqualTo(OutboxConsts.BizType.DEPOSIT);
+        assertThat(dlq.getBizNo()).isEqualTo("DP3");
+        assertThat(dlq.getRetryCount()).isEqualTo(3);
+        assertThat(dlq.getStatus()).isEqualTo(OutboxConsts.DlqStatus.OPEN);
+        assertThat(dlq.getErrorMessage()).contains("still down");
+        verify(outboxMessageMapper, never()).markSent(any());
     }
 
     @Test

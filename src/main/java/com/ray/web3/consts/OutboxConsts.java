@@ -20,6 +20,27 @@ public final class OutboxConsts {
         }
     }
 
+    /** 死信来源表（dlq_message.source_table） */
+    public static final class SourceTable {
+        public static final String OUTBOX = "outbox_message";
+
+        private SourceTable() {
+        }
+    }
+
+    /** 死信处理状态（dlq_message.status） */
+    public static final class DlqStatus {
+        /** 待人工处理 */
+        public static final String OPEN = "OPEN";
+        /** 已人工处理（重放/补偿完成） */
+        public static final String HANDLED = "HANDLED";
+        /** 确认忽略（如脏数据/业务已撤销） */
+        public static final String IGNORED = "IGNORED";
+
+        private DlqStatus() {
+        }
+    }
+
     /** 投递状态（outbox_message.status） */
     public static final class Status {
         /** 待投递：投递器扫描的入口状态 */

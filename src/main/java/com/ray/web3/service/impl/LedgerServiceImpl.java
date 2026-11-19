@@ -11,6 +11,7 @@ import com.ray.web3.model.entity.Account;
 import com.ray.web3.model.entity.LedgerEntry;
 import com.ray.web3.model.entity.LedgerPosting;
 import com.ray.web3.enums.BalanceType;
+import com.ray.web3.enums.Direction;
 import com.ray.web3.model.ledger.LedgerGroup;
 import com.ray.web3.model.ledger.Posting;
 import com.ray.web3.service.LedgerService;
@@ -129,6 +130,35 @@ public class LedgerServiceImpl implements LedgerService {
     public LedgerEntry unfreeze(String withdrawNo, long userAccountId, BigDecimal amount, String currency) {
         return postInternal(LedgerGroupFactory.unfreezeWithdraw(
                 withdrawNo, userAccountId, amount, currency), false);
+    }
+
+    @Override
+    @Transactional(transactionManager = "ledgerTransactionManager", rollbackFor = Exception.class)
+    public LedgerEntry refundWithdrawFreeze(String withdrawNo) {
+        LedgerEntry freeze = ledgerEntryMapper.selectByBiz(LedgerConsts.BizType.FREEZE, withdrawNo);
+        if (freeze == null) {
+            // 该提币没有走过账本冻结（例如尚未接入用户资产的早期链路），无需补偿
+            log.info("[ledger] 提币无冻结分录，无需解冻 withdrawNo={}", withdrawNo);
+            return null;
+        }
+
+        List<LedgerPosting> postings = ledgerPostingMapper.selectByEntryId(freeze.getId());
+        LedgerPosting frozenLeg = postings.stream()
+                .filter(p -> LedgerConsts.BalanceType.FROZEN.equals(p.getBalanceType()))
+                .filter(p -> Direction.CREDIT.name().equals(p.getDirection()))
+                .findFirst()
+                .orElseThrow(() -> new LedgerPostingException(
+                        "提币冻结分录缺少 FROZEN 入账腿，无法解冻: withdrawNo=" + withdrawNo));
+
+        LedgerGroup group = LedgerGroupFactory.unfreezeWithdraw(
+                withdrawNo + LedgerConsts.BizNo.WITHDRAW_REFUND_SUFFIX,
+                frozenLeg.getAccountId(),
+                frozenLeg.getAmount(),
+                frozenLeg.getCurrency());
+        log.info("[ledger] 提币失败自动解冻 withdrawNo={} accountId={} amount={} {}",
+                withdrawNo, frozenLeg.getAccountId(), frozenLeg.getAmount().toPlainString(),
+                frozenLeg.getCurrency());
+        return postInternal(group, false);
     }
 
     @Override

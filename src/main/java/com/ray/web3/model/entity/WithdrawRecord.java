@@ -62,6 +62,9 @@ public class WithdrawRecord {
     /** 失败/拒绝原因 */
     private String errorMessage;
 
+    /** 解冻补偿状态：NONE=未处理/无需补偿，REFUNDED=已调用账本解冻（避免扫描器每轮重复处理） */
+    private String refundStatus;
+
     private LocalDateTime updatedAt;
 
     private LocalDateTime createdAt;

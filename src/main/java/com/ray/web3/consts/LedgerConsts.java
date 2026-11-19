@@ -59,6 +59,20 @@ public final class LedgerConsts {
         }
     }
 
+    /** 业务单号约定（ledger_entry.biz_no） */
+    public static final class BizNo {
+        /**
+         * 提币失败解冻的幂等后缀：{@code biz_no = withdraw_no + "_REFUND"}。
+         * <p>
+         * 原冻结组是 {@code (FREEZE, withdraw_no)}，解冻必须换一个 bizNo 才不会撞 uk_biz，
+         * 同时保证同一笔提币重复补偿只会解冻一次。
+         */
+        public static final String WITHDRAW_REFUND_SUFFIX = "_REFUND";
+
+        private BizNo() {
+        }
+    }
+
     /** 子账类型（ledger_posting.balance_type） */
     public static final class BalanceType {
         /** 可用余额 */
