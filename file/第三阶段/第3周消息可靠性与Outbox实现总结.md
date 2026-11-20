@@ -86,7 +86,7 @@ KEY idx_status_next (status, next_retry_at)
 | 路由 + Outbox | `DepositRoutingServiceImpl` | 钱包匹配 → `INSERT IGNORE deposit_record` → 按地址反查 userId 回填 → 同事务写 `outbox_message` |
 | 定时触发器 | `OutboxDispatchScheduler` | `@Scheduled(fixedDelay=dispatch-interval-ms)`；`web3.outbox.enabled=false` 时整个 Bean 不加载 |
 | 投递器 | `OutboxDispatcher` | `SKIP LOCKED` 扫描、逐条投递、SENT/重试/FAILED、回填 `notify_status` |
-| 退避算法 | `OutboxBackoff` | 第 1 次 base 秒，之后翻倍，封顶 max 秒；无 jitter（小规模可观察优先） |
+| 退避算法 | `RetryPolicy` | 第 1 次 base 秒，之后翻倍，封顶 max 秒，再乘 `[0.5, 1.5)` jitter；达上限写 DLQ |
 | Redis 通道 | `RedisOutboxPublisher` | `PUBLISH deposit_channel`；`transport=redis` 或未配置时加载（`matchIfMissing=true`） |
 | Kafka 通道 | `KafkaOutboxPublisher` | `send(topic, key, payload).get(timeout)`；key=partitionKey，空则回退 bizNo |
 | Topic 创建 | `KafkaOutboxConfig` | 仅 `transport=kafka` 时注册 `NewTopic`（6 分区 / 1 副本） |
@@ -275,12 +275,12 @@ kafka-topics.sh --bootstrap-server localhost:9092 --alter --topic deposit-outbox
 
 ### 7.1 单测
 
-与 Outbox/消费者直接相关的 9 个测试类，共 **38 个用例**，全部通过：
+与 Outbox/消费者直接相关的 9 个测试类，共 **41 个用例**，全部通过（2026-11-20 复跑）：
 
 | 测试类 | 用例数 | 覆盖点 |
 |---|---:|---|
 | `OutboxDispatcherTest` | 6 | 扫描、投递、退避、SENT/FAILED |
-| `OutboxBackoffTest` | 4 | 退避边界 |
+| `RetryPolicyTest` | 7 | 指数/jitter/封顶/耗尽 |
 | `RedisOutboxPublisherTest` | 2 | Redis 通道 |
 | `KafkaOutboxPublisherTest` | 3 | partitionKey / bizNo 回退 |
 | `DepositOutboxConsumerTest` | 4 | ack/不 ack/CommitFailedException |
@@ -288,7 +288,7 @@ kafka-topics.sh --bootstrap-server localhost:9092 --alter --topic deposit-outbox
 | `DepositCreditServiceTransactionTest` | 2 | consumer_biz 幂等 + H2 回滚 |
 | `DepositRoutingOutboxTransactionTest` | 2 | 业务 + Outbox 同事务/回滚 |
 | `DepositRoutingServiceImplTest` | 10 | 路由、Outbox、地址反查、分区键 |
-| **合计** | **38** | 完整 `mvn test` 全绿 |
+| **合计** | **41** | 相关测试全绿 |
 
 ### 7.2 本地端到端数据（2026-11-18）
 

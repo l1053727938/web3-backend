@@ -14,7 +14,7 @@
 | **消息丢失** | 业务提交后、投递前进程崩溃；旧写法“先落库再发消息” | 用户充值永远不到账 | ① `deposit_record` 与 `outbox_message` 同一个本地事务写入（`DepositRoutingServiceImpl.route` 的 `@Transactional`）；<br>② 独立投递器扫描 `status='NEW' AND next_retry_at <= NOW(3)`，按指数退避重试；<br>③ 超过 `max-retries` 置 `FAILED` 转人工补偿；<br>④ 消费者处理成功才 ack，失败不提交 offset，重启/rebalance 后重投 | `DepositRoutingOutboxTransactionTest` 2/2；`OutboxDispatcherTest` 6/6 |
 | **消息重复** | 投递成功但改状态前宕机；Kafka 至少一次投递；rebalance 重投 | 重复入账，用户余额虚增 | ① `consumer_biz` 主键 `INSERT IGNORE`，命中即 `duplicate=true` 直接 ack（`DepositCreditService.credit`）；<br>② 账本 `ledger_entry.uk_biz(biz_type, biz_no)` 幂等，重复调用返回原分录、不再动余额（`LedgerServiceImpl.postInternal`）；<br>③ 两层任意一层命中都不会二次加钱 | `DepositCreditServiceTransactionTest` 2/2；`LedgerServiceImplTest` 8/8（`uk_biz` 用例） |
 | **消息乱序** | 多分区并发消费；同一用户连续多笔事件 | 纯加法充值最终余额仍正确；但冻结/扣减/结算等**非交换操作**可能余额不足误拒或状态错乱 | ① 账本按 `account_id` 升序 `FOR UPDATE` 加锁，避免死锁与并发覆盖；<br>② 回写走 `version` 乐观锁，冲突整组回滚；<br>③ 分区键 `partition_key=userId`（HOT 回退 bizNo），保证同一用户进同一分区（见 2.3） | `LedgerServiceImplTest`；`KafkaOutboxPublisherTest` |
-| **投递持续失败/积压** | broker 不可用、网络分区 | 消息堆积，充值确认延迟 | `retry_count` + `OutboxBackoff` 指数退避；达上限置 `FAILED`；扫描走 `idx_status_next(status, next_retry_at)` | `OutboxDispatcherTest` |
+| **投递持续失败/积压** | broker 不可用、网络分区 | 消息堆积，充值确认延迟 | `retry_count` + `RetryPolicy` 指数退避 + jitter；达上限写 `dlq_message` 并置 `FAILED`；扫描走 `idx_status_next(status, next_retry_at)` | `OutboxDispatcherTest` |
 | **消费毒消息** | payload 损坏、账户不存在、账本异常 | 无限重投、阻塞分区 | 当前不 ack + 重投；DLQ 留到第 4 周（计划已列） | `DepositCreditService` 失败路径单测 |
 
 ---

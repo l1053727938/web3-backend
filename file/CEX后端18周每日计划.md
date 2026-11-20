@@ -17,8 +17,8 @@
 |---|---|---|---|
 | W1 | U1-a 分户模型 + 三表 | ✅ 100% | 三表 DDL + CHECK、MoneyUtils + 4 单测已交付（2026-11-09）；账本服务已在 W2 完成 |
 | W2 | U1-b 四类分录 + 重建 | ✅ 100% | `post()` 五步、四场景分录、冲正、重建 SQL、独立数据源、HTTP 入口、20 个账本单测、联调脚本；并发/重建 diff 待实跑 |
-| W3 | U2-a outbox + Kafka | 🟡 90% | outbox_message + 投递器 + Redis/Kafka 通道 + consumer_biz 消费者 + 26 个相关单测/H2 回滚测试；Kafka 容器验证 healthy，应用端到端待本机 MySQL 凭据实跑 |
-| W4 | U2-b 重试 + 对账起头 | 🟡 25% | 已有 FAILED 状态位、RPC 退避 jitter 可迁移、条数对账；缺消费重试/DLQ/lag |
+| W3 | U2-a outbox + Kafka | ✅ 100% | outbox_message + 投递器 + Redis/Kafka 通道 + consumer_biz 消费者 + 26 个相关单测/H2 回滚测试；Kafka 容器验证 healthy，应用端到端待本机 MySQL 凭据实跑 |
+| W4 | U2-b 重试 + 对账起头 | 🟡 60% | 已有 RetryPolicy + Outbox DLQ、FAILED 自动解冻、lag 指标；缺消费端重试/DLQ、杀消费者演练、三方关联、RPC 主备 |
 | W5 | U3 对账与差错处置 | 🟡 15% | 已有 decimals 快照与单号体系；`INIT` 三态规则已设计、代码未写 |
 | W6 | U3.5-a 水位 + 归集 | ⬜ 10% | 现有 gas 查询/估算可 1h 盘点完；水位/补充/归集/实测全缺 |
 | W7 | U3.5-b 手续费 + M1 | ⬜ 5% | `GasRepriceUtils` 三段结构可复用；`fee`/分录/type-2 全缺 |
@@ -299,24 +299,25 @@
 
 核心目标：`FAILED` 能自动解冻退款；杀消费者 5 分钟不丢不重；对账的三方数据源能按 `biz_no` 打通。
 
-> **状态：🟡 部分完成 · 约 25%**
-> **已有**：`notify_status=FAILED` 状态位（可直接做补偿）、Resilience4j `rpc-segment` 的指数退避 + jitter 0.5（RPC 版，可迁移到消费重试）、`saved-count` 条数对账
-> **缺**：消费重试策略与 DLQ、`FAILED` 自动解冻、lag 指标、三方关联模型、➕ RPC 主备 failover
+> **状态：🟡 部分完成 · 约 60%（2026-11-20）**
+> **已有**：`RetryPolicy`（指数退避 + jitter）、Outbox DLQ（`dlq_message` + 原消息保留 FAILED）、`FAILED` 提币自动解冻、`kafka_consumer_lag` 指标、`saved-count` 条数对账
+> **缺**：消费端重试/DLQ、杀消费者 5 分钟演练记录、三方关联 SQL、RPC 主备 failover
 
-- **Day 1-2（3h）：[🔴 P1 死磕] 退避重试与 DLQ**
+- ✅ **Day 1-2（3h）：[🔴 P1 死磕] 退避重试与 DLQ**
   - 公式：`delay = min(base * 2^retry, cap) * (0.5 + random())`，`base=1s, cap=5min`。
   - 为什么不立即 requeue：1000 条消息同时失败会瞬间重投 1000 条，把刚缓过来的 DB 再打挂——这就是重试风暴。
   - 为什么要 jitter：所有实例的重试时间对齐，等于制造一次定时脉冲。
   - 超最大次数（建议 8 次）→ 写 `dlq_message` 表 + 告警，**不删原消息**。
   - 输出：`RetryPolicy` + 单测（断言 jitter 落在 `[0.5d, 1.5d]` 区间，跑 100 次不全相同）。
+  - 📄 实现说明：[file/第四阶段/Day1-2退避重试与DLQ.md](第四阶段/Day1-2退避重试与DLQ.md)（`RetryPolicy`、失败状态机、`dlq_message`、34 个相关单测）
 
-- **Day 3-4（3h）：失败补偿 + 杀消费者演练**
+- 🟡 **Day 3-4（3h）：失败补偿 + 杀消费者演练**
   - 🟡 `FAILED` 提币自动解冻（注意区分：现有 `notify_status=FAILED` 是通知失败，与提币失败无关）：复用 U1 第四场景，`biz_no = withdraw_no + '_REFUND'`，天然幂等。
   - 演练：`docker stop kafka`（或停消费者）5 分钟 → 期间继续产生充值 → 重启 → 校验：总条数一致、余额一致、重复落账数 = 0。
   - lag 指标：`kafka_consumer_lag` 或自算 `endOffset - currentOffset`，暴露到 Actuator。
   - 输出：演练记录（处理前 N 条 / 重启后总数 / 重复数）。
 
-- **Day 5-6（4h）：对账三方模型**
+- ⬜ **Day 5-6（4h）：对账三方模型**
   - 三方：`transfer_event_log`（链上事实，由分页拉取 + 补拉兜底产出，现成代码）、`ledger_posting`（账本）、`account`（余额）。关联键 `biz_no = chain_id + tx_hash + log_index`。
   - 链上侧完整性自检（不写新代码，只用现有端点）：条数与 `saved-count` 独立直查对齐，发现漏扫就靠补拉自然补齐——这是"充值漏扫怎么发现"这个问题的真实答案。
   - 三条核对线：链上 vs 账本（漏账/重复）、账本 vs 余额（账本自身一致性）、总额 vs 平台负债（资损）。

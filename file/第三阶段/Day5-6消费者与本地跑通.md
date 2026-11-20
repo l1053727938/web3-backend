@@ -23,7 +23,7 @@ DepositRoutingServiceImpl.route()  ── 同一本地事务 ──┐
                                                      │
                                                      ▼
                               KafkaOutboxPublisher → topic: deposit-outbox
-                                                     │ key=depositNo, value=JSON
+                                                     │ key=partitionKey（userId），空回退 bizNo
                                                      ▼
                               DepositOutboxConsumer（enable.auto.commit=false）
                                                      │ 处理成功才 ack
@@ -48,7 +48,7 @@ DepositRoutingServiceImpl.route()  ── 同一本地事务 ──┐
 | `mapper/OutboxMessageMapper.java` | 插入 / `SKIP LOCKED` 扫描 / SENT/FAILED/退避更新 |
 | `config/OutboxProperties.java` | 通道、批量、重试、Kafka topic 配置 |
 | `config/DepositConsumerProperties.java` | 平台负债账户 / 用户账户类型 |
-| `util/OutboxBackoff.java` | 指数退避纯函数 |
+| `util/RetryPolicy.java` | 指数退避 + jitter + 封顶 + 耗尽判定 |
 | `config/KafkaOutboxConfig.java` | 自动创建 topic |
 | `sql/kafka_demo_data.sql` | 演示 USER 充值地址（映射 user_id=10001） |
 | `docker-compose.yml` | KRaft 单节点 Kafka |
@@ -204,8 +204,8 @@ FROM `account` WHERE id IN (900001, 900101);
    消费者会报错且不 ack；演示请使用 `kafka_demo_data.sql` 里的 USER 地址。
 2. **平台负债账户 ID 必须配置**：`web3.deposit.consumer.platform-liability-account-id`，
    本地测试默认 `900101`，生产通过环境变量覆盖。
-3. **Kafka 通道只在 `WEB3_OUTBOX_TRANSPORT=kafka` 时启用**：
-   默认 `redis` 保持旧行为（Outbox → Redis 频道），不会启动 Kafka 消费者。
+3. **Kafka 通道由 `WEB3_OUTBOX_TRANSPORT` 控制**：
+   当前 `application.yml` 默认 `kafka`；显式设 `redis` 可切回 Redis 频道（不启动 Kafka 消费者）。
 4. **手动 ack**：`spring.kafka.consumer.enable-auto-commit=false` +
    `spring.kafka.listener.ack-mode=manual_immediate`，只有处理成功才提交 offset；
    失败不 ack，重启/rebalance 后重投，账本按 `depositNo` 幂等。
