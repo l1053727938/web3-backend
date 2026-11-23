@@ -104,6 +104,16 @@ web3:
     chain-id: 31337   # Anvil 本地链；主网为 1，Sepolia 为 11155111
     # eth_getLogs 分页单段最大区块跨度，节点限制更严时可调小（如 500/1000）
     log-chunk-size: ${WEB3_LOG_CHUNK_SIZE:50}
+    # ===== RPC 主备容灾（第 4 周 Day 5-6 余量）=====
+    failover:
+      # 关闭时只使用 http-url，行为与单节点一致
+      enabled: ${WEB3_RPC_FAILOVER_ENABLED:false}
+      # 逗号分隔的备用 RPC 地址；主节点仍是 http-url
+      backup-urls: ${WEB3_RPC_FAILOVER_BACKUP_URLS:}
+      # 连续失败达到该次数后切换；默认 1 = 429/超时立即切
+      failure-threshold: ${WEB3_RPC_FAILOVER_THRESHOLD:1}
+      # 半开探活间隔（ms）：每 30s 用 eth_blockNumber 试主节点
+      probe-interval-ms: ${WEB3_RPC_FAILOVER_PROBE_INTERVAL_MS:30000}
   # ============ 历史日志补拉（监听器启动时的状态补齐）============
   backfill:
     enabled: ${WEB3_BACKFILL_ENABLED:false}

@@ -331,7 +331,7 @@ mysql -u root -p --default-character-set=utf8mb4 web3_backend < sql/reconcile_th
 | 三条核对线 | ✅ | 第 3、6、8 节 SQL：链上 vs 账本 / 账本 vs 余额 / 总额 vs 平台负债 |
 | 乱序处理 | 🟡 部分 | 分区键已实现；`biz_version` 未实现（第 5 周） |
 | ReconcileJob / `reconcile_diff` / 六类 / 分片 / 从库 / INIT / Reorg | ⬜ 第 5 周 | 本 Day 只做模型与 SQL |
-| RPC 主备 `RpcProviderManager` | ⬜ 未实现 | 计划 Day 5-6 的“本周余量”附加项，与三方对账正交 |
+| RPC 主备 `RpcProviderManager` | ✅ 已实现 | 传输层 429/5xx/超时切换 + 30s 半开探活；`RpcProviderManagerTest` 5/5 |
 
 ---
 
@@ -353,7 +353,7 @@ mysql -u root -p --default-character-set=utf8mb4 web3_backend < sql/reconcile_th
 11. **`saved-count` 是库内计数**，不是链上计数；链上条数用日志列表的 `data` 长度。
 12. **多链必须带 `chain_id`**：所有查询都以 `chain_id` 为第一过滤条件。
 13. **Reorg/INVALID/时间差/六类报表**：第 5 周，不在本 Day。
-14. **RPC 主备 failover**：计划中的附加项，尚未实现；与三方对账独立。
+14. **RPC 主备 failover 已实现**：在 `Web3jService` 传输层切换；默认关闭，启用与配置见第十二节。
 
 ---
 
@@ -385,7 +385,10 @@ mysql -u root -p --default-character-set=utf8mb4 web3_backend < sql/reconcile_th
 | `src/main/java/com/ray/web3/service/impl/DepositCreditService.java` | 消费入账、HOT 拒绝 |
 | `src/main/java/com/ray/web3/service/impl/LedgerServiceImpl.java` | 记账内核、`balance_after`、冲正 |
 | `src/main/java/com/ray/web3/service/impl/DepositWalletServiceImpl.java` | 配置热钱包 + DB 地址并集 |
-| `src/main/resources/application.yml` | `hot-wallets` / `platform-liability-account-id` |
+| `src/main/java/com/ray/web3/rpc/RpcProviderManager.java` | RPC 主备切换（`Web3jService` 传输层） |
+| `src/main/java/com/ray/web3/scanner/RpcProviderProbeScheduler.java` | 主节点半开探活（30s） |
+| `src/main/java/com/ray/web3/config/Web3jConfig.java` | 装配主/备 `HttpService` 与 `RpcProviderManager` |
+| `src/main/resources/application.yml` | `hot-wallets` / `platform-liability-account-id` / `web3.infura.failover.*` |
 
 ---
 
@@ -415,4 +418,81 @@ mysql -u root -p --default-character-set=utf8mb4 web3_backend < sql/reconcile_th
 
 **⑦ 哪些内容留给第 5 周？**
 `ReconcileJob`、`reconcile_diff`、六类差异、三类报表、分片/从库、`INIT` 接管、
-Reorg 演练、精度差专项；RPC 主备也是未实现的附加项。
+Reorg 演练、精度差专项。
+
+**⑧ 重试和 RPC 主备有什么区别？**
+重试管同一节点的时间节奏（退避 + jitter）；主备管节点本身不可用（429/5xx/超时/连接重置），
+切换后用同一请求重试备用节点。两者互补，不能互相替代。
+
+---
+
+## 十二、附：RPC 供应商容灾（2h 本周余量）
+
+### 12.1 与重试的分工
+
+| 机制 | 管什么 | 典型触发 |
+|---|---|---|
+| `RetryPolicy` / Resilience4j | 同一节点的时间节奏 | 临时失败，退避后可能恢复 |
+| `RpcProviderManager` | 节点本身不可用 | 429 限频、5xx、超时、连接重置/拒绝 |
+
+只做重试：主节点持续 429 会把整批请求拖到 cap；只做 failover：主节点抖动时来回切换。
+两者叠加才是完整策略。
+
+### 12.2 实现
+
+- `src/main/java/com/ray/web3/rpc/RpcProviderManager.java` 实现 `Web3jService`：
+  - 列表第一个是主节点（`web3.infura.http-url`），后面是 `backup-urls`；
+  - `send/sendBatch` 在当前节点失败（429/5xx/超时/连接重置）时，**用同一请求立即尝试下一个节点**；
+    备用成功则业务层不会收到切换异常；
+  - 连续失败达到 `failure-threshold` 后记录永久切换；成功调用重置计数；
+  - 参数错误（如 HTTP 400）不切换，直接抛给调用方；
+  - `probePrimary()`：用 `Web3j.build(primary).eth_blockNumber()` 探活主节点，成功切回。
+- `src/main/java/com/ray/web3/scanner/RpcProviderProbeScheduler.java`：
+  仅 `enabled=true` 时加载，每 30s 调一次 `probePrimary()`。
+- `src/main/java/com/ray/web3/config/Web3jConfig.java`：
+  把 `web3jService` Bean 换成 `RpcProviderManager`，`Web3j` 仍构建在它之上；
+  业务 Service 注入的 `Web3j` 不变，`DebugTraceServiceImpl` 的自定义 RPC 也复用同一条通道。
+- WebSocket 通道（`wsWeb3j`）独立，不经过本管理器。
+
+### 12.3 配置
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `web3.infura.failover.enabled` | `false` | 关闭时只使用 `http-url`，行为与单节点一致 |
+| `web3.infura.failover.backup-urls` | 空 | 逗号分隔的备用 RPC 地址；空项自动跳过 |
+| `web3.infura.failover.failure-threshold` | `1` | 连续失败达到该次数后记录永久切换；当前请求始终会尝试备用 |
+| `web3.infura.failover.probe-interval-ms` | `30000` | 主节点半开探活间隔（ms） |
+
+示例：
+
+```bash
+WEB3_RPC_FAILOVER_ENABLED=true
+WEB3_RPC_FAILOVER_BACKUP_URLS=https://backup-1.example.com/v3/xxx,https://backup-2.example.com/v3/xxx
+```
+
+### 12.4 关键日志
+
+```text
+[rpc-failover] provider[0] 连续失败 1 次，切换到 provider[1]: Too Many Requests
+[rpc-failover] 主节点恢复（block=123456），已切回主节点
+```
+
+### 12.5 测试
+
+`src/test/java/com/ray/web3/rpc/RpcProviderManagerTest.java`，5 个用例：
+
+- 主节点 429 → 同一请求切备用，第二次调用不再打主节点；
+- 主节点恢复 → `probePrimary()` 切回主节点；
+- 超时 → 切换；
+- 400 参数错误 → 不切换；
+- 所有节点失败 → 抛最后一个异常，不无限循环。
+
+本次 `mvn -Dtest=RpcProviderManagerTest test`：5/5 通过。
+
+### 12.6 注意
+
+- 默认关闭；启用前确认 `backup-urls` 与主节点在同一链（`chain-id` 一致），
+  否则读到的链上数据可能不一致。
+- 探活只证明 `eth_blockNumber` 可用，不代表归档数据 / `eth_getLogs` 一定可用；
+  主备切换后仍要依赖对账发现数据差异。
+- 写交易也走 HTTP `Web3j`，主备切换不改变 nonce 分配语义；nonce 仍由 `wallet_nonce` 单点分配。

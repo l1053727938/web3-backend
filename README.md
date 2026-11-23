@@ -34,7 +34,7 @@
 - **统一响应与异常处理**：`ApiResponse` 封装 + `GlobalExceptionHandler`（RPC 类异常统一转 `502`）
 - **API 文档**：SpringDoc OpenAPI 3.1（`/swagger-ui.html`、`/v3/api-docs`）
 - **可观测性**：Actuator + Micrometer Prometheus
-- **离线单元测试**：137 个 JUnit 5（含 Mockito/H2）用例（不依赖真实节点/DB/Redis，覆盖充值路由、Outbox 投递/消费幂等、账本分录、参数校验与第 2 周 JWT/限流行为），`mvn test` 全绿
+- **离线单元测试**：161 个 JUnit 5（含 Mockito/H2）用例（不依赖真实节点/DB/Redis，覆盖充值路由、Outbox 投递/消费幂等、账本分录、RPC 主备切换、参数校验与第 2 周 JWT/限流行为），`mvn test` 全绿
 - **充值业务路由与落库（模块四）**：实时/补拉解出的 Transfer 事件按 `to` 地址比对平台热钱包与用户充值地址（配置中心 + `deposit_wallet` 表），
   命中则以 `(chain_id, txHash, logIndex)` 唯一键幂等写入 `deposit_record`（状态**待确认**），并在同一事务写 `outbox_message`（详见 [5.10](#510-充值业务路由与落库模块四)、[5.16](#516-outbox-消息投递与-kafka-消费者第-3-周)）
 - **复式账本（第 2 周）**：`account` 余额物化 + `ledger_entry`/`ledger_posting` 只增不改；借贷平衡、按 account_id 升序加锁、
@@ -43,6 +43,8 @@
   成功置 `SENT`，失败累计次数并按指数退避，超限置 `FAILED`；通道可在 Redis（默认）与 Kafka 间切换（详见 [5.16](#516-outbox-消息投递与-kafka-消费者第-3-周)）
 - **Kafka 消费者与账本入账（第 3 周 Day 5-6）**：`enable.auto.commit=false` + 手动 ack；`consumer_biz` 主键幂等，
   重复消息直接 ack 跳过；按 userId/currency 解析账户后调用 `LedgerService.deposit()`，账本 `uk_biz` 兜底幂等
+- **RPC 供应商容灾（第 4 周 Day 5-6 余量）**：`RpcProviderManager` 在 `Web3jService` 传输层做主备切换；
+  429/5xx/超时自动切备用并重试同一请求，每 30s 半开探活主节点；默认关闭（`web3.infura.failover.enabled`）
 - **三方对账模型（第 4 周 Day 5-6）**：`transfer_event_log` → `deposit_record` → `ledger_entry/ledger_posting` → `account` 关联；
   `sql/reconcile_three_way.sql` 提供链上 vs 账本、账本 vs 余额、总额 vs 平台负债三条核对线与差异分类；
   完整 ReconcileJob/差异表留到第 5 周（详见 [file/第四阶段/Day5-6对账三方模型.md](file/第四阶段/Day5-6对账三方模型.md)）
@@ -208,6 +210,8 @@ web3-backend
     │       └── HistoryBackfillServiceImpl.java   # 逐页推进 + Redisson 互斥
     ├── scanner/AutoBackfillScanner.java      # 定时自动核对（游标→链高补拉，双触发 + 全局锁）
     ├── scanner/OutboxDispatchScheduler.java  # 定时触发 OutboxDispatcher（多实例靠 SKIP LOCKED）
+    ├── scanner/RpcProviderProbeScheduler.java # 每 30s 探活 RPC 主节点
+    ├── rpc/RpcProviderManager.java           # RPC 主备切换（实现 Web3jService，业务无感知）
     ├── mapper/
     │   ├── BlockSyncStateMapper.java         # 游标 upsert（GREATEST 单调前移）/ 回读
     │   ├── TransferEventLogMapper.java       # INSERT IGNORE 批量写 + 对账计数
@@ -820,6 +824,10 @@ Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:TOKEN" } http://local
 | `web3.infura.proxy-host` | `WEB3_PROXY_HOST` | `127.0.0.1` | HTTP RPC 代理主机，留空直连 |
 | `web3.infura.proxy-port` | `WEB3_PROXY_PORT` | `7890` | HTTP RPC 代理端口 |
 | `web3.infura.log-chunk-size` | `WEB3_LOG_CHUNK_SIZE` | 50 | `eth_getLogs` 单段最大区块跨度（节点限制严时调小到 50/10） |
+| `web3.infura.failover.enabled` | `WEB3_RPC_FAILOVER_ENABLED` | false | 是否启用 RPC 主备切换；关闭时只用 `http-url` |
+| `web3.infura.failover.backup-urls` | `WEB3_RPC_FAILOVER_BACKUP_URLS` | 空 | 逗号分隔的备用 RPC 地址；空项自动跳过 |
+| `web3.infura.failover.failure-threshold` | `WEB3_RPC_FAILOVER_THRESHOLD` | 1 | 连续失败达到该次数后记录永久切换；当前请求始终会尝试备用 |
+| `web3.infura.failover.probe-interval-ms` | `WEB3_RPC_FAILOVER_PROBE_INTERVAL_MS` | 30000 | 主节点半开探活间隔（ms） |
 | `web3.backfill.enabled` | `WEB3_BACKFILL_ENABLED` | true | 是否加载历史补拉服务与 REST 端点（关闭后调补拉接口报“未启用”） |
 | `web3.backfill.chunk-size` | `WEB3_BACKFILL_CHUNK_SIZE` | 1000 | 补拉单页区块跨度；命中节点上限时由 `EventLogService` 自动缩跨度，无需手工调小 |
 | `web3.backfill.max-blocks-per-run` | `WEB3_BACKFILL_MAX_BLOCKS` | 0（没有单次上限） | 单次请求最多推进区块数，设正数可把大区间拆成多次调用（下次从游标自动续拉，响应 `limited=true`） |

@@ -18,7 +18,7 @@
 | W1 | U1-a 分户模型 + 三表 | ✅ 100% | 三表 DDL + CHECK、MoneyUtils + 4 单测已交付（2026-11-09）；账本服务已在 W2 完成 |
 | W2 | U1-b 四类分录 + 重建 | ✅ 100% | `post()` 五步、四场景分录、冲正、重建 SQL、独立数据源、HTTP 入口、20 个账本单测、联调脚本；并发/重建 diff 待实跑 |
 | W3 | U2-a outbox + Kafka | ✅ 100% | outbox_message + 投递器 + Redis/Kafka 通道 + consumer_biz 消费者 + 26 个相关单测/H2 回滚测试；Kafka 容器验证 healthy，应用端到端待本机 MySQL 凭据实跑 |
-| W4 | U2-b 重试 + 对账起头 | 🟡 75% | 已有 RetryPolicy + Outbox DLQ、FAILED 自动解冻、lag 指标、三方关联 SQL/差异查询；缺消费端重试/DLQ、杀消费者演练、RPC 主备、完整 ReconcileJob（第5周） |
+| W4 | U2-b 重试 + 对账起头 | 🟡 85% | 已有 RetryPolicy + Outbox DLQ、FAILED 自动解冻、lag 指标、三方关联 SQL/差异查询、RPC 主备容灾；缺消费端重试/DLQ、杀消费者演练、完整 ReconcileJob（第5周） |
 | W5 | U3 对账与差错处置 | 🟡 15% | 已有 decimals 快照与单号体系；`INIT` 三态规则已设计、代码未写 |
 | W6 | U3.5-a 水位 + 归集 | ⬜ 10% | 现有 gas 查询/估算可 1h 盘点完；水位/补充/归集/实测全缺 |
 | W7 | U3.5-b 手续费 + M1 | ⬜ 5% | `GasRepriceUtils` 三段结构可复用；`fee`/分录/type-2 全缺 |
@@ -299,9 +299,9 @@
 
 核心目标：`FAILED` 能自动解冻退款；杀消费者 5 分钟不丢不重；对账的三方数据源能按 `biz_no` 打通。
 
-> **状态：🟡 部分完成 · 约 75%（2026-11-23）**
-> **已有**：`RetryPolicy`（指数退避 + jitter）、Outbox DLQ（`dlq_message` + 原消息保留 FAILED）、`FAILED` 提币自动解冻、`kafka_consumer_lag` 指标、`saved-count` 条数对账、三方关联 SQL/差异查询（`sql/reconcile_three_way.sql`）
-> **缺**：消费端重试/DLQ、杀消费者 5 分钟演练记录、RPC 主备 failover、完整 `ReconcileJob`/`reconcile_diff`（第 5 周）
+> **状态：🟡 部分完成 · 约 85%（2026-11-23）**
+> **已有**：`RetryPolicy`（指数退避 + jitter）、Outbox DLQ（`dlq_message` + 原消息保留 FAILED）、`FAILED` 提币自动解冻、`kafka_consumer_lag` 指标、`saved-count` 条数对账、三方关联 SQL/差异查询（`sql/reconcile_three_way.sql`）、RPC 主备容灾（`RpcProviderManager`）
+> **缺**：消费端重试/DLQ、杀消费者 5 分钟演练记录、完整 `ReconcileJob`/`reconcile_diff`（第 5 周）
 
 - ✅ **Day 1-2（3h）：[🔴 P1 死磕] 退避重试与 DLQ**
   - 公式：`delay = min(base * 2^retry, cap) * (0.5 + random())`，`base=1s, cap=5min`。
@@ -323,9 +323,9 @@
   - 链上侧完整性自检（不写新代码，只用现有端点）：条数与 `saved-count` 独立直查对齐，发现漏扫就靠补拉自然补齐——这是"充值漏扫怎么发现"这个问题的真实答案。
   - 三条核对线：链上 vs 账本（漏账/重复）、账本 vs 余额（账本自身一致性）、总额 vs 平台负债（资损）。
   - 乱序处理：`user_id` 分区保序 + 业务版本号（`biz_version`），收到比当前小的版本直接丢弃（`biz_version` 当前未实现，见文档）。
-  - ⬜ RPC 供应商容灾（2h，本周余量，未实现）：封装 `RpcProviderManager`——主备节点列表 + 连续失败计数，遇 429 限频或超时自动切备用供应商；切换后对主节点半开探活（每 30s 试一笔 `eth_blockNumber`），恢复再切回。与 Day 1-2 的退避互补：**退避管"同一节点的重试节奏"，failover 管"这个节点不行了"**——只做退避，429 会把整批请求拖到 cap 上限；只做 failover，主节点抖动时来回切换。
+  - ✅ RPC 供应商容灾（2h，本周余量）：封装 `RpcProviderManager`——主备节点列表 + 连续失败计数，遇 429 限频或超时自动切备用供应商；切换后对主节点半开探活（每 30s 试一笔 `eth_blockNumber`），恢复再切回。与 Day 1-2 的退避互补：**退避管"同一节点的重试节奏"，failover 管"这个节点不行了"**——只做退避，429 会把整批请求拖到 cap 上限；只做 failover，主节点抖动时来回切换。
   - 输出：关联 SQL + 一条能查出"链上有、账本无"的查询。
-  - 📄 已交付：[sql/reconcile_three_way.sql](../sql/reconcile_three_way.sql) + [file/第四阶段/Day5-6对账三方模型.md](第四阶段/Day5-6对账三方模型.md)
+  - 📄 已交付：[sql/reconcile_three_way.sql](../sql/reconcile_three_way.sql) + [file/第四阶段/Day5-6对账三方模型.md](第四阶段/Day5-6对账三方模型.md)（含 RPC 主备章节与 `RpcProviderManagerTest` 5 用例）
 
 - **Day 7（2h）：自测 + 提交**
   - 重试为什么必须带 jitter？消费第 3 次失败该做什么？同一用户两条充值乱序怎么收敛？
