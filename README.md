@@ -43,6 +43,9 @@
   成功置 `SENT`，失败累计次数并按指数退避，超限置 `FAILED`；通道可在 Redis（默认）与 Kafka 间切换（详见 [5.16](#516-outbox-消息投递与-kafka-消费者第-3-周)）
 - **Kafka 消费者与账本入账（第 3 周 Day 5-6）**：`enable.auto.commit=false` + 手动 ack；`consumer_biz` 主键幂等，
   重复消息直接 ack 跳过；按 userId/currency 解析账户后调用 `LedgerService.deposit()`，账本 `uk_biz` 兜底幂等
+- **三方对账模型（第 4 周 Day 5-6）**：`transfer_event_log` → `deposit_record` → `ledger_entry/ledger_posting` → `account` 关联；
+  `sql/reconcile_three_way.sql` 提供链上 vs 账本、账本 vs 余额、总额 vs 平台负债三条核对线与差异分类；
+  完整 ReconcileJob/差异表留到第 5 周（详见 [file/第四阶段/Day5-6对账三方模型.md](file/第四阶段/Day5-6对账三方模型.md)）
 - **对外 API 安全（第 2 周打底，默认关闭）**：`/api/chain/**` 与 `/api/ledger/**` 可选挂 JWT（HS256）鉴权拦截器（无/过期 Token→401、scope 不足→403，健康检查放行）；
   `eth_getLogs` 类日志/区块查询入口可选挂 Guava 令牌桶限流（超速率→429）；HMAC 请求签名先出设计文档（详见 [5.14](#514-对外-api-安全jwt-鉴权--入口令牌桶第-2-周打底)）
 
@@ -118,6 +121,7 @@ web3-backend
 ├── sql/schema.sql                            # MySQL 初始化脚本（全部表）
 ├── sql/ledger_test_data.sql                  # 复式账本联调账户（可选）
 ├── sql/kafka_demo_data.sql                   # Kafka 端到端演示充值地址（可选）
+├── sql/reconcile_three_way.sql               # 第 4 周：三方对账关联/差异 SQL（只读）
 ├── scripts/ledger-api-demo.sh / .http        # 账本四场景 + 冲正一键联调
 ├── file/第三阶段/Day5-6消费者与本地跑通.md    # Kafka 端到端联调步骤与关键日志
 ├── docs/技术选型.md                            # 技术选型详解
