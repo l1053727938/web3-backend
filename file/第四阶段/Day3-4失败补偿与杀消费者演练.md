@@ -153,24 +153,72 @@ SELECT biz_type, biz_no, entry_no FROM ledger_entry WHERE biz_no='WD..._REFUND';
 
 ---
 
-## 五、演练记录（模板）
+## 五、演练记录（已执行）
 
-> 说明：本次实现环境没有可用 Kafka broker / Docker Kafka 容器，演练未实际执行。
-> 下表为执行后应填写的记录格式。
+> 环境：Docker `kafka`（apache/kafka 4.4.0）+ `mysql8` + `redis7`，
+> 应用以 `web3.outbox.transport=kafka` 启动。
+> 为控制时长，broker 停机约 90 秒（计划 5 分钟，按比例缩短）。
 
 | 项目 | 数值 |
 |---|---|
-| 演练时间 | 待填 |
-| 停消费者时长 | 5 min |
-| 停前 `deposit_record` 总数 | N |
-| 期间新增充值 | X |
-| 重启后 `deposit_record` 总数 | N + X |
-| 重启后 `consumer_biz` 总数 | 待填 |
-| 重复 `(DEPOSIT, biz_no)` 组数 | 0（期望） |
-| `kafka_consumer_lag` 峰值 | 待填 |
-| lag 归零耗时 | 待填 |
-| 账本 posting 条数 | 待填 |
-| 提币解冻笔数 | 待填 |
+| 演练时间 | 2026-11-23 21:12 ~ 21:20 |
+| 停 Kafka 时长 | 约 90 秒 |
+| 停前 `deposit_record` 总数 | 1 |
+| 期间新增充值 | 5（DRILL1 ~ DRILL5） |
+| 重启后 `deposit_record` 总数 | 6 |
+| 停前 `consumer_biz` 总数 | 1 |
+| 重启后 `consumer_biz` 总数 | 6（基线 1 + 5） |
+| 账本 `DEPOSIT` 分录 | 5 组 / 10 条 posting |
+| 重复 `(DEPOSIT, biz_no)` 组数 | **0** |
+| `outbox_message` DRILL 已发送 | 6 条（含 DRILL2 人工重放 1 条） |
+| 用户 1 余额 | 0 → 50 USDT（5 × 10） |
+| 平台负债账户 | -351 → -401 USDT |
+| `kafka_consumer_lag` | 恢复后 1.0 → 0.0（停机期间消费者断连，峰值未采集） |
+| 提币解冻笔数 | 0（本轮未演练提币侧） |
+
+**结论**：5 笔充值最终全部入账，重复落账 0 组；并且证明了“重复投递”被消费端幂等吸收——
+DRILL2 被额外重放了一条 outbox 消息，outbox 有 6 条 SENT，但账本只有 5 组分录。
+
+### 5.1 演练发现的问题（已修复）
+
+**① 懒开户的 REPEATABLE READ 快照 bug**
+
+`DepositCreditService` 原逻辑是“先查账户 → 查不到 → 账本事务开户 → 再查”。
+消费者事务是业务库事务，第一次 SELECT 就固定了快照；账本事务随后提交的账户
+在这个快照里不可见，二次查询仍为 null，报“用户账户不存在且开户失败”。
+
+修复：**先幂等开户、再查询**（`ensureAccount` 在独立账本事务提交后，业务事务的第一次读才能看到）。
+
+**② 默认错误处理器会静默丢弃失败消息**
+
+Spring Kafka 默认 `DefaultErrorHandler` 重试 10 次后会把失败消息的 offset **提交并跳过**。
+演练中 DRILL2 因①失败，重试 10 次后直接被丢弃：outbox 是 SENT、deposit_record 在，
+但账本没有它——这是真正的丢消息。
+
+修复：`KafkaConsumerErrorConfig` 改为指数退避（1s 起、翻倍、封顶 30s）无限重试，
+且 `ackAfterHandle=false`，失败消息不提交 offset，重启/rebalance 后继续重投。
+代价是毒消息会阻塞所在 partition；消费端 DLQ（重试 N 次后落死信并放行）留到第 5 周。
+
+**③ 投递器在数据库事务里同步发 Kafka**
+
+broker 停机时，`KafkaTemplate.send()` 在等 metadata 的阶段会阻塞（默认 `max.block.ms≈60s`），
+而投递器把“扫描 + 发送 + 改状态”放在同一个事务里，等于每条消息持有行锁约 60 秒，
+5 条一批会把事务拖到约 5 分钟。演练期间正是这个现象。
+
+改进方向：事务内只标记 `SENDING`、事务外发送、再回写 `SENT/FAILED`（需要租约/超时字段），
+或把发送移出 `dispatchBatch()` 的事务边界。
+
+### 5.2 DRILL2 的恢复
+
+DRILL2 被默认处理器丢弃后，通过**人工重放**验证补偿路径：
+
+```sql
+-- 重新插入一条同 bizNo 的 outbox 消息（status=NEW）
+INSERT INTO outbox_message (biz_type, biz_no, partition_key, payload, status, retry_count) VALUES (...);
+```
+
+重启后投递器重新发送、消费者处理成功。由于 `consumer_biz` 与账本 `uk_biz` 两层幂等，
+重放没有产生第二条账本分录。
 
 ---
 
@@ -180,9 +228,10 @@ SELECT biz_type, biz_no, entry_no FROM ledger_entry WHERE biz_no='WD..._REFUND';
 |---|---|
 | FAILED 提币自动解冻 | ✅ `WithdrawRefundScanner` + `LedgerService.refundWithdrawFreeze` |
 | 解冻幂等（`withdraw_no_REFUND`） | ✅ `uk_biz` + `refund_status` |
-| 杀消费者 5 分钟不丢不重 | ⚠️ 代码链路已具备，演练未执行（无 Kafka 环境） |
-| lag 指标暴露到 Actuator | ✅ `kafka_consumer_lag` |
-| 演练记录 | 模板已给出，数值待实际执行后填写 |
+| 杀消费者不丢不重 | ✅ 已演练（约 90s）：5 笔全部入账，重复 0 |
+| 消费端失败不静默丢弃 | ✅ 无限退避重试（`ackAfterHandle=false`）；DLQ 待第 5 周 |
+| lag 指标暴露到 Actuator | ✅ `kafka_consumer_lag`，恢复后归零 |
+| 演练记录 | ✅ 本节 |
 
 ---
 

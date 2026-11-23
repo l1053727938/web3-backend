@@ -100,12 +100,11 @@ public class DepositCreditService {
             throw new IllegalStateException("充值消息缺少 currency: depositNo=" + event.depositNo());
         }
         String accountType = consumerProperties.getUserAccountType();
+        // 必须先幂等开户、再查询：消费者事务是业务库事务（REPEATABLE READ），
+        // 如果先 SELECT，快照就固定了；随后账本事务插入的账户在这个快照里不可见，
+        // 二次 SELECT 仍返回 null，会被误判成“开户失败”。先开户后查询可避开该陷阱。
+        ledgerAccountService.ensureAccount(userId, accountType, event.currency());
         Account account = accountMapper.selectByUserTypeCurrency(userId, accountType, event.currency());
-        if (account == null) {
-            // 懒开户：注册不跨连接池写账本表，首次入账时幂等补一行，再回读
-            ledgerAccountService.ensureAccount(userId, accountType, event.currency());
-            account = accountMapper.selectByUserTypeCurrency(userId, accountType, event.currency());
-        }
         if (account == null) {
             throw new IllegalStateException("用户账户不存在且开户失败: userId=" + userId
                     + ", type=" + accountType + ", currency=" + event.currency());

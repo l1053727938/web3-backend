@@ -134,7 +134,7 @@ web3:
   # ============ WebSocket 实时订阅（newHeads & logs）============
   # 默认关闭，需要时打开 enabled（本地 Anvil 或 Infura WS 端点）
   websocket:
-    enabled: ${WEB3_WS_ENABLED:true}
+    enabled: ${WEB3_WS_ENABLED:false}
     # Anvil: ws://127.0.0.1:8545   Infura: wss://mainnet.infura.io/ws/v3/{projectId}
     url: ${WEB3_WS_URL:ws://127.0.0.1:8545}
 #    url: wss://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_PROJECT_ID:}

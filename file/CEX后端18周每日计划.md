@@ -18,7 +18,7 @@
 | W1 | U1-a 分户模型 + 三表 | ✅ 100% | 三表 DDL + CHECK、MoneyUtils + 4 单测已交付（2026-11-09）；账本服务已在 W2 完成 |
 | W2 | U1-b 四类分录 + 重建 | ✅ 100% | `post()` 五步、四场景分录、冲正、重建 SQL、独立数据源、HTTP 入口、20 个账本单测、联调脚本；并发/重建 diff 待实跑 |
 | W3 | U2-a outbox + Kafka | ✅ 100% | outbox_message + 投递器 + Redis/Kafka 通道 + consumer_biz 消费者 + 26 个相关单测/H2 回滚测试；Kafka 容器验证 healthy，应用端到端待本机 MySQL 凭据实跑 |
-| W4 | U2-b 重试 + 对账起头 | 🟡 85% | 已有 RetryPolicy + Outbox DLQ、FAILED 自动解冻、lag 指标、三方关联 SQL/差异查询、RPC 主备容灾；缺消费端重试/DLQ、杀消费者演练、完整 ReconcileJob（第5周） |
+| W4 | U2-b 重试 + 对账起头 | 🟡 90% | 已有 RetryPolicy + Outbox DLQ、FAILED 自动解冻、lag 指标、三方关联 SQL/差异查询、RPC 主备容灾；杀消费者演练已执行（5 笔全入账、重复 0），演练发现并修复懒开户快照/消费端丢消息两处缺陷；缺消费端 DLQ、投递器事务外发送、提币冻结端到端、完整 ReconcileJob（第5周） |
 | W5 | U3 对账与差错处置 | 🟡 15% | 已有 decimals 快照与单号体系；`INIT` 三态规则已设计、代码未写 |
 | W6 | U3.5-a 水位 + 归集 | ⬜ 10% | 现有 gas 查询/估算可 1h 盘点完；水位/补充/归集/实测全缺 |
 | W7 | U3.5-b 手续费 + M1 | ⬜ 5% | `GasRepriceUtils` 三段结构可复用；`fee`/分录/type-2 全缺 |
@@ -299,9 +299,10 @@
 
 核心目标：`FAILED` 能自动解冻退款；杀消费者 5 分钟不丢不重；对账的三方数据源能按 `biz_no` 打通。
 
-> **状态：🟡 部分完成 · 约 85%（2026-11-23）**
-> **已有**：`RetryPolicy`（指数退避 + jitter）、Outbox DLQ（`dlq_message` + 原消息保留 FAILED）、`FAILED` 提币自动解冻、`kafka_consumer_lag` 指标、`saved-count` 条数对账、三方关联 SQL/差异查询（`sql/reconcile_three_way.sql`）、RPC 主备容灾（`RpcProviderManager`）
-> **缺**：消费端重试/DLQ、杀消费者 5 分钟演练记录、完整 `ReconcileJob`/`reconcile_diff`（第 5 周）
+> **状态：🟡 部分完成 · 约 90%（2026-11-23）**
+> **已有**：`RetryPolicy`（指数退避 + jitter）、Outbox DLQ（`dlq_message` + 原消息保留 FAILED）、`FAILED` 提币自动解冻（`refund_status` + 扫描器）、`kafka_consumer_lag` 指标、`saved-count` 条数对账、三方关联 SQL/差异查询（`sql/reconcile_three_way.sql`）、RPC 主备容灾（`RpcProviderManager`）
+> **演练（2026-11-23）**：停 Kafka ~90s、期间注入 5 笔充值 → 重启后 5 笔全部入账、重复 0、余额一致、lag 归零。演练发现并修复：① 懒开户在 REPEATABLE READ 快照下误判“开户失败”；② Spring Kafka 默认错误处理器重试 10 次后静默丢弃消息（改为指数退避无限重试 + `ackAfterHandle=false`）。详见 `file/第四阶段/Day3-4失败补偿与杀消费者演练.md`
+> **缺**：消费端 DLQ（毒消息隔离）、投递器“事务外发送”（broker 停机时 send 阻塞持有行锁）、提币冻结链路端到端、Day7 自测、完整 `ReconcileJob`/`reconcile_diff`（第 5 周）
 
 - ✅ **Day 1-2（3h）：[🔴 P1 死磕] 退避重试与 DLQ**
   - 公式：`delay = min(base * 2^retry, cap) * (0.5 + random())`，`base=1s, cap=5min`。
@@ -311,8 +312,9 @@
   - 输出：`RetryPolicy` + 单测（断言 jitter 落在 `[0.5d, 1.5d]` 区间，跑 100 次不全相同）。
   - 📄 实现说明：[file/第四阶段/Day1-2退避重试与DLQ.md](第四阶段/Day1-2退避重试与DLQ.md)（`RetryPolicy`、失败状态机、`dlq_message`、34 个相关单测）
 
-- 🟡 **Day 3-4（3h）：失败补偿 + 杀消费者演练**
-  - 🟡 `FAILED` 提币自动解冻（注意区分：现有 `notify_status=FAILED` 是通知失败，与提币失败无关）：复用 U1 第四场景，`biz_no = withdraw_no + '_REFUND'`，天然幂等。
+- ✅ **Day 3-4（3h）：失败补偿 + 杀消费者演练**
+  - ✅ `FAILED` 提币自动解冻（注意区分：现有 `notify_status=FAILED` 是通知失败，与提币失败无关）：复用 U1 第四场景，`biz_no = withdraw_no + '_REFUND'`，天然幂等。
+  - 📄 演练记录：[file/第四阶段/Day3-4失败补偿与杀消费者演练.md](第四阶段/Day3-4失败补偿与杀消费者演练.md)（停 Kafka ~90s，5 笔全入账、重复 0；发现并修复懒开户快照与消费端丢消息两处缺陷）
   - 演练：`docker stop kafka`（或停消费者）5 分钟 → 期间继续产生充值 → 重启 → 校验：总条数一致、余额一致、重复落账数 = 0。
   - lag 指标：`kafka_consumer_lag` 或自算 `endOffset - currentOffset`，暴露到 Actuator。
   - 输出：演练记录（处理前 N 条 / 重启后总数 / 重复数）。
