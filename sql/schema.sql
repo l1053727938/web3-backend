@@ -297,6 +297,28 @@ CREATE TABLE IF NOT EXISTS `consumer_biz` (
   PRIMARY KEY (`biz_no`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='消费端幂等表：挡住 Outbox 至少一次投递带来的重复消息';
 
+-- 对账差异明细（第 5 周 Day 3-4）：ReconcileJob 每跑一次按日窗口重建
+-- uk_date_biz_type 保证同一报告日同一条业务/差异类型只留一行，重跑幂等
+CREATE TABLE IF NOT EXISTS `reconcile_diff` (
+  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `report_date`   DATE            NOT NULL                COMMENT '对账报告日',
+  `biz_type`      VARCHAR(32)     NOT NULL DEFAULT 'DEPOSIT' COMMENT '业务类型',
+  `biz_no`        VARCHAR(128)    NOT NULL                COMMENT '业务单号；无充值记录的链上孤儿用 CHAIN:tx:log',
+  `diff_type`     VARCHAR(24)     NOT NULL                COMMENT 'TIMING/MISSING/DUPLICATE/REORG/UNKNOWN_TOKEN/PRECISION',
+  `report_group`  VARCHAR(16)     NOT NULL                COMMENT 'IN_TRANSIT/OVER_SHORT/UNDETERMINED',
+  `direction`     VARCHAR(8)      NULL                    COMMENT 'LONG=长款（账>链），SHORT=短款（账<链）',
+  `chain_amount`  DECIMAL(38,18)  NULL                    COMMENT '链上应入账金额',
+  `ledger_amount` DECIMAL(38,18)  NULL                    COMMENT '账本已入账金额',
+  `delta`         DECIMAL(38,18)  NULL                    COMMENT 'ledger_amount - chain_amount',
+  `currency`      VARCHAR(16)     NULL                    COMMENT '币种（未知代币为空）',
+  `evidence`      VARCHAR(512)    NULL                    COMMENT '判定依据（快照 decimals、当前 decimals 等）',
+  `status`        VARCHAR(16)     NOT NULL DEFAULT 'OPEN' COMMENT 'OPEN=待处理，RESOLVED=已收敛，IGNORED=人工忽略',
+  `created_at`    DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_date_biz_type` (`report_date`, `biz_no`, `diff_type`),
+  KEY `idx_date_group` (`report_date`, `report_group`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='对账差异明细（按日重建，重跑幂等）';
+
 -- 死信队列（第 4 周 Day 1-2）：重试达到上限的消息在这里留档，原 outbox_message 不删除只置 FAILED
 -- 幂等键 uk_source：同一条原消息只会产生一条死信，重复处理不会堆多条
 CREATE TABLE IF NOT EXISTS `dlq_message` (

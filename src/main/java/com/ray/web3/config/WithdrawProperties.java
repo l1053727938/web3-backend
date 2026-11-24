@@ -67,6 +67,23 @@ public class WithdrawProperties {
      */
     private long trackStuckTimeoutMs = 600000L;
 
+    // ===== 第 5 周 Day 5-6：INIT 锚点接管 =====
+
+    /** INIT 接管开关：关闭后 INIT 记录只保留，不做三态判定 */
+    private boolean initRecoveryEnabled = true;
+
+    /** INIT 接管扫描间隔(ms) */
+    private long initRecoveryIntervalMs = 60000L;
+
+    /** 单轮最多处理 INIT 条数 */
+    private int initRecoveryBatchSize = 20;
+
+    /**
+     * 无 txHash 时按 (from, nonce) 回扫的区块深度：
+     * 覆盖“已打包但本地没回填 hash”的窗口；扫不到一律保持 INIT，不判失败。
+     */
+    private int initRecoveryLookbackBlocks = 100;
+
     // ===== 第 4 周 Day 3-4：FAILED 提币自动解冻补偿 =====
 
     /**

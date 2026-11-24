@@ -186,6 +186,12 @@ web3:
     wallet-cache-refresh-ms: ${WEB3_DEPOSIT_WALLET_TTL_MS:30000}
     # 确认阈值(区块数)：写入下游消息供账务判断最终确定性，0=不设置
     confirm-threshold: ${WEB3_DEPOSIT_CONFIRM_THRESHOLD:12}
+    # ===== 第 5 周 Day 5-6：重组回滚检测（默认关闭，Reorg 演练时打开）=====
+    # receipt 消失 / 对应 logIndex 不存在 → 已确认充值转 INVALID 并写冲正
+    reorg-enabled: ${WEB3_DEPOSIT_REORG_ENABLED:false}
+    reorg-interval-ms: ${WEB3_DEPOSIT_REORG_INTERVAL_MS:60000}
+    reorg-lookback-blocks: ${WEB3_DEPOSIT_REORG_LOOKBACK_BLOCKS:200}
+    reorg-batch-size: ${WEB3_DEPOSIT_REORG_BATCH_SIZE:100}
     # 批量入库与路由分片大小不再可配：统一取常量 DbConsts.INSERT_BATCH_SIZE（流水表与充值表同口径）
 
     # ===== Day 5-6：充值消息消费入账（web3.outbox.transport=kafka 时生效）=====
@@ -223,6 +229,24 @@ web3:
       # 消费 lag 指标刷新间隔(ms)：自算 endOffset - committedOffset，暴露为 kafka_consumer_lag
       lag-refresh-ms: ${WEB3_OUTBOX_KAFKA_LAG_REFRESH_MS:15000}
 
+  # ============ 对账（第 5 周 Day 3-4）============
+  reconcile:
+    # 每日自动对账（默认关闭，联调时调 POST /api/reconcile/run 手动触发）
+    enabled: ${WEB3_RECONCILE_ENABLED:false}
+    # 默认次日 01:30 跑前一天
+    cron: ${WEB3_RECONCILE_CRON:0 30 1 * * *}
+    # 按 user_id 哈希分片并发：N=8，每片 core=2，全局令牌桶 50 QPS
+    shards: ${WEB3_RECONCILE_SHARDS:8}
+    shard-threads: ${WEB3_RECONCILE_SHARD_THREADS:2}
+    qps: ${WEB3_RECONCILE_QPS:50}
+    # 代币白名单：不在名单里的到账合约归“待定性”，不进入长短款；留空回退 token-symbols
+    token-whitelist:
+      - 0x5fbdb2315678afecb367f032d93f642f64180aa3
+      - 0xdac17f958d2ee523a2206206994597c13d831ec7
+    # 当前 decimals 覆盖表（合约 → 当前精度），用于识别精度差；未配置回退链上 decimals()
+    # 构造精度差演示时可临时用 --web3.reconcile.current-decimals[<contract>]=8 覆盖
+    current-decimals: {}
+
   # ============ 用户业务（第 3 周）：注册 + 充值地址分配 ============
   user:
     # BIP39 主助记词。⚠ 默认值是 Anvil/Hardhat 公开助记词，仅限本地联调；
@@ -253,6 +277,13 @@ web3:
     track-batch-size: ${WEB3_WITHDRAW_TRACK_BATCH_SIZE:100}
     # 成功所需确认数：0=收据 status=0x1 即成功；>0 需 (链高-收据块高+1)≥此值，防区块重组误判（同充值侧口径）
     track-confirmations: ${WEB3_WITHDRAW_TRACK_CONFIRMATIONS:12}
+    # ===== 第 5 周 Day 5-6：INIT 提币三态接管 =====
+    # 已上链成功→SUCCESS；已上链失败/被同 nonce 顶替→FAILED；池内未见→保持 INIT
+    init-recovery-enabled: ${WEB3_WITHDRAW_INIT_RECOVERY_ENABLED:true}
+    init-recovery-interval-ms: ${WEB3_WITHDRAW_INIT_INTERVAL_MS:60000}
+    init-recovery-batch-size: ${WEB3_WITHDRAW_INIT_BATCH_SIZE:20}
+    # 无 txHash 时回扫的区块深度；扫不到一律保持 INIT，不判失败
+    init-recovery-lookback-blocks: ${WEB3_WITHDRAW_INIT_LOOKBACK_BLOCKS:100}
     # ===== 第 4 周 Day 3-4：FAILED 提币自动解冻补偿 =====
     # 扫描 FAILED 且 refund_status=NONE 的提币，按账本原冻结分录自动解冻；幂等靠 bizNo=withdrawNo_REFUND
     refund-scan-interval-ms: ${WEB3_WITHDRAW_REFUND_INTERVAL_MS:60000}

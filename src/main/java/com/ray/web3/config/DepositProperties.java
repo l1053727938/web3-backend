@@ -42,6 +42,19 @@ public class DepositProperties {
     /** 确认阈值（区块数）：链上最新高度 - 入账高度 ≥ 该值时由确认任务置为已入账；0=不做确认推进 */
     private long confirmThreshold = 12L;
 
+    // ===== 第 5 周 Day 5-6：重组回滚检测 =====
+
+    /** 是否启用重组检测（默认关闭；本地 Reorg 演练时打开） */
+    private boolean reorgEnabled = false;
+
+    private long reorgIntervalMs = 60000L;
+
+    /** 回看区块深度：只检查最近 N 个块内已确认的充值 */
+    private int reorgLookbackBlocks = 200;
+
+    /** 单轮最多检查条数 */
+    private int reorgBatchSize = 100;
+
     /**
      * 合约地址大小写不敏感：Spring 绑定后统一转小写，避免配置里写成混合大小写导致反查漏命中。
      * <p>

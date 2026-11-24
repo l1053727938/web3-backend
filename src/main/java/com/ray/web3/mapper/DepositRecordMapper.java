@@ -42,6 +42,38 @@ public interface DepositRecordMapper extends BaseMapper<DepositRecord> {
             """)
     int insertIgnoreBatch(@Param("list") List<DepositRecord> list);
 
+    /** 按充值单号回读（重组回滚定位用） */
+    @Select("""
+            SELECT * FROM deposit_record WHERE deposit_no = #{depositNo}
+            """)
+    DepositRecord selectByDepositNo(@Param("depositNo") String depositNo);
+
+    /**
+     * 取最近窗口内已确认的充值（第 5 周 Day 5-6 重组检测入口）
+     */
+    @Select("""
+            SELECT * FROM deposit_record
+            WHERE chain_id = #{chainId}
+              AND status = 'CREDITED'
+              AND block_number >= #{minBlock}
+            ORDER BY block_number DESC
+            LIMIT #{limit}
+            """)
+    List<DepositRecord> selectCreditedSince(@Param("chainId") Long chainId,
+                                            @Param("minBlock") Long minBlock,
+                                            @Param("limit") int limit);
+
+    /**
+     * 重组回滚：待确认/已入账 → INVALID（只前进，重复执行返回 0）
+     */
+    @Update("""
+            UPDATE deposit_record
+            SET status = 'INVALID'
+            WHERE deposit_no = #{depositNo}
+              AND status IN ('PENDING_CONFIRM', 'CREDITED')
+            """)
+    int markInvalid(@Param("depositNo") String depositNo);
+
     /**
      * 幂等回读：按幂等键取已存在的充值记录，无则返回 null
      */

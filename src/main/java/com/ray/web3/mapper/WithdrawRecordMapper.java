@@ -91,6 +91,42 @@ public interface WithdrawRecordMapper extends BaseMapper<WithdrawRecord> {
                      @Param("errorMessage") String errorMessage);
 
     /**
+     * INIT 接管：链上已确认本笔执行成功 → 回填 SUCCESS（第 5 周 Day 5-6）。
+     * <p>
+     * 仅从 INIT 流转，重复执行返回 0 行；不回拨 nonce。
+     */
+    @Update("""
+            UPDATE withdraw_record
+            SET status = 'SUCCESS', transaction_hash = #{txHash}, error_message = NULL
+            WHERE withdraw_no = #{withdrawNo} AND status = 'INIT'
+            """)
+    int markInitSuccess(@Param("withdrawNo") String withdrawNo, @Param("txHash") String txHash);
+
+    /**
+     * INIT 接管：确定失败（上链 Revert 或同 nonce 被顶替）→ FAILED。
+     * <p>
+     * 解冻由 {@code WithdrawRefundScanner} 异步完成；本方法只改状态，不回拨 nonce。
+     */
+    @Update("""
+            UPDATE withdraw_record
+            SET status = 'FAILED',
+                transaction_hash = COALESCE(#{txHash}, transaction_hash),
+                error_message = #{errorMessage}
+            WHERE withdraw_no = #{withdrawNo} AND status = 'INIT'
+            """)
+    int markInitFailed(@Param("withdrawNo") String withdrawNo,
+                       @Param("txHash") String txHash,
+                       @Param("errorMessage") String errorMessage);
+
+    /** INIT 未判定时推进 updated_at，避免队头固定占满批次（与 BROADCAST 心跳同口径） */
+    @Update("""
+            UPDATE withdraw_record
+            SET updated_at = NOW()
+            WHERE withdraw_no = #{withdrawNo} AND status = 'INIT'
+            """)
+    int touchInit(@Param("withdrawNo") String withdrawNo);
+
+    /**
      * 取待解冻补偿的 FAILED 记录（第 4 周 Day 3-4）：
      * 只处理 {@code refund_status='NONE'}，补偿成功后置 REFUNDED，避免每轮重复扫同一笔。
      */

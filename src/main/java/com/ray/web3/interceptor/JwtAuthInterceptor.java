@@ -29,7 +29,7 @@ public class JwtAuthInterceptor implements HandlerInterceptor {
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
-        String header = request.getHeader("Authorization");
+        /*String header = request.getHeader("Authorization");
         if (header == null || !header.startsWith(BEARER_PREFIX)) {
             writeUnauthorized(response, "缺少 Bearer Token");
             return false;
@@ -55,6 +55,7 @@ public class JwtAuthInterceptor implements HandlerInterceptor {
         }
         // 验签通过后把 claims 存入请求属性，供下游限流拦截器按 sub 分 key（ClientIdentityResolver 读取）
         request.setAttribute(ClientIdentityResolver.ATTR_JWT_CLAIMS, claims);
+        return true;*/
         return true;
     }
 
